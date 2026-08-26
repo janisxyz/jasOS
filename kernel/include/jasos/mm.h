@@ -76,6 +76,7 @@ status_t vmm_map(aspace_t *as, virt_t va, phys_t pa, u64 n_pages, u64 flags);
 status_t vmm_unmap(aspace_t *as, virt_t va, u64 n_pages);
 status_t vmm_alloc_user(struct process *p, virt_t *base, u64 size, u32 prot, u32 type);
 status_t vmm_free_user(struct process *p, virt_t base, u64 size);
+status_t vmm_protect_user(struct process *p, virt_t base, u64 size, u32 prot, u32 *old_prot);
 bool   vmm_probe_user(aspace_t *as, virt_t va, u64 n, bool write);
 bool   vmm_handle_user_fault(aspace_t *as, virt_t va, bool write);
 aspace_t *vmm_kernel_aspace(void);

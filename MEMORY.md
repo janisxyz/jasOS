@@ -184,6 +184,22 @@ current page, matching the hardware HHDM path. Residual: the pointer
 array for a 32 MiB VAD is 64 KiB of pointers — still fail-closed by
 `USER_COMMIT_MAX`, not a frame bomb.
 
+T13: `NtProtectVirtualMemory` retargets a whole VAD's `prot`. Hardware
+updates present PTEs and `invlpg`. NOACCESS clears `PTE_P` (frame
+stays in the PTE so a later RW protect can restore). Subrange split
+is residual (`STATUS_NOT_SUPPORTED`). Host probe now honours
+`PAGE_NOACCESS` the way the hardware probe already did.
+
+T14: subrange split is real. `vmm_protect_user` / `vmm_free_user` cut
+a containing VAD into prefix / mid / suffix. Host shadows are carved
+into new pointer arrays (kalloc before VMM lock). `size == 0` free is
+the whole VAD at `base`. After protect, adjacent same-prot VADs
+coalesce so a split-then-restore is one region again. Hardware
+`apply_prot_range` restores a NOACCESS'd frame instead of leaking it.
+Residual: a range that spans two VADs with a hole, or mixed prot,
+is `CONFLICTING_ADDRESSES`. Unmap still holds VMM across `pmm_free`.
+
+
 
 
 

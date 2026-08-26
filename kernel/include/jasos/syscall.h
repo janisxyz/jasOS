@@ -41,7 +41,8 @@
 #define SYS_NtSetTimer                 34
 #define SYS_NtCancelTimer              35
 #define SYS_NtWaitForMultipleObjects   36
-#define SYS_MAX                        37
+#define SYS_NtProtectVirtualMemory     37
+#define SYS_MAX                        38
 
 status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 *info);
 
@@ -83,6 +84,7 @@ status_t NtSetTimer(handle_t h, u64 due_ticks, u64 period);
 status_t NtCancelTimer(handle_t h);
 status_t NtWaitForMultipleObjects(handle_t *hs, u32 count, bool wait_all, u64 timeout_ticks);
 status_t NtQueryVirtualMemory(handle_t proc, virt_t addr, void *buf, u64 n);
+status_t NtProtectVirtualMemory(handle_t proc, virt_t base, u64 size, u32 prot, u32 *old_prot);
 
 typedef struct sys_process_info {
     kpid_t pid;

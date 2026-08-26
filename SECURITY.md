@@ -48,6 +48,12 @@ closed vs residual.
 | Inherit bit always 0 | `ht_set_inherit` / `DUPLICATE_INHERIT` / `ht_inherit_table` on create |
 | Host whole-VAD shadow | per-page 4 KiB; 1 MiB VAD + 1 byte write stays under 32 KiB heap |
 | `ht_destroy` kfree under HANDLE | snapshot slot, drop lock, then close/deref |
+| `g_procs` UAF | table ref on insert; reap derefs; close cannot free a tabulated process |
+| User `NtProtect` to W^X | refused `INVALID_PAGE_PROTECTION` |
+| Exact-match protect/free | split a containing VAD; size 0 free is whole region |
+| `vmm_free_user` ignored size | a 1-page free of an 8-page VAD no longer nukes the rest |
+| NOACCESS then RW leaked the frame | `apply_prot_range` restores `pa` when `PTE_P` is clear |
+| WAIT_ALL poll on owned mutex | `disp_satisfied` counts owner==self even when `signal_state==0` |
 
 ## Residual (honest)
 
@@ -63,6 +69,8 @@ closed vs residual.
 | HHDM maps RAM RW | heap and copyin live there | kernel `.text` is RO in HHDM; user never has HHDM |
 | virtio-blk virtqueues | identify-only; I/O is Ramdisk0 | do not print "virtio I/O up" |
 | PIC not LAPIC | 8259 is v1; MADT/x2APIC is the next HAL | dmesg says 8259, never LAPIC |
+| Protect spans mixed VADs | one containing VAD only; coalesce is same-prot adjacent | fail closed `CONFLICTING_ADDRESSES` |
+| Unmap holds VMM across PMM | hole-steal if we drop the lock first | unmap under lock; rank inversion is residual |
 
 
 ## Panic path contract

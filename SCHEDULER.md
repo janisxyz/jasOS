@@ -142,5 +142,11 @@ and switch-in call `sched_exit_thread`. Host: `sched_start` zeros
 idle's ucontext `valid` bit; last non-idle exit `longjmp`s from the
 dying kstack so we never `setcontext` a post-longjmp idle frame.
 
+T14: WAIT_ALL fast path uses `disp_satisfied`: a mutex the caller
+already owns counts, even though `signal_state` is 0 while held.
+A timeout-0 WAIT_ALL on (owned mutex, signaled event) is SUCCESS,
+not TIMEOUT. Consume still goes through `ke_wait_object` and bumps
+mutex recursion — two `NtReleaseMutex` to fully drop.
+
 
 

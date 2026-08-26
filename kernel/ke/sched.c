@@ -314,6 +314,7 @@ void sched_exit_thread(status_t st)
                     if (g_procs[i] == proc) {
                         g_procs[i] = g_procs[--g_nprocs];
                         g_procs[g_nprocs] = NULL;
+                        ob_dereference(&proc->hdr); /* drop table ref */
                         break;
                     }
                 }
@@ -344,8 +345,12 @@ void ke_on_tick(void)
     for (u32 i = 0; i < g_nprocs; i++) {
         process_t *p = g_procs[i];
         if (!p) continue;
+        if (p->thread_count == 0) continue;
+        if (list_empty(&p->threads)) continue;
+        if (!p->threads.next || !p->threads.prev) continue;
         list_t *e, *n;
         LIST_FOR_EACH_SAFE(e, n, &p->threads) {
+            if (!e || !e->next || !e->prev) break;
             thread_t *th = CONTAINER_OF(e, thread_t, proc_link);
             if (th->state != THR_WAITING || !th->wait_timed) continue;
             if (cpu->ticks < th->wait_timeout_tick) continue;
@@ -529,7 +534,10 @@ status_t psp_create_process(const char *image, process_t *parent, process_t **ou
     strlcpy(p->image, image ? image : "unknown", sizeof(p->image));
     if (parent) strlcpy(p->cwd, parent->cwd, PATH_MAX);
     else strlcpy(p->cwd, "/", PATH_MAX);
-    if (g_nprocs < MAX_PROCESSES) g_procs[g_nprocs++] = p;
+    if (g_nprocs < MAX_PROCESSES) {
+        g_procs[g_nprocs++] = p;
+        ob_reference(&p->hdr); /* table ref; NtClose must not free us */
+    }
     if (out) *out = p;
     return STATUS_SUCCESS;
 }

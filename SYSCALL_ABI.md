@@ -133,6 +133,7 @@ Max copyin size v1: 1 MiB. Bigger is `STATUS_INVALID_PARAMETER`.
 | 34 | `NtSetTimer` | handle | due ticks | period | | |
 | 35 | `NtCancelTimer` | handle | | | | |
 | 36 | `NtWaitForMultipleObjects` | handles | count | wait_all | timeout | |
+| 37 | `NtProtectVirtualMemory` | process | base | size | prot | old_prot |
 
 `-1` as a process/thread handle means current. Real handles are
 `(generation << 16) | (index << 2)`, never all-ones.
@@ -172,6 +173,16 @@ never called in kernel.
 T12: `NtTerminateThread` a0 may be a real thread handle (not only
 `-1`). `NtDuplicateObject` a5 is flags. `PROCESS_DUP_HANDLE` is
 required to duplicate into/out of another process.
+
+T13: syscall 37 `NtProtectVirtualMemory`. Whole VAD only. W^X is
+`INVALID_PAGE_PROTECTION`.
+
+T14: `NtProtectVirtualMemory` splits a containing VAD. Subrange is
+no longer `NOT_SUPPORTED`. A range that is not contained in one VAD
+is `CONFLICTING_ADDRESSES`. `NtFreeVirtualMemory` honours `size`;
+`size == 0` releases the whole VAD at `base` (NT `MEM_RELEASE`).
+`NtUnmapViewOfSection` passes size 0.
+
 
 
 

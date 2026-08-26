@@ -29,6 +29,7 @@
 #define STATUS_OBJECT_NAME_COLLISION   ((status_t)0xC0000035u)
 #define STATUS_OBJECT_PATH_NOT_FOUND   ((status_t)0xC000003Au)
 #define STATUS_MUTANT_NOT_OWNED        ((status_t)0xC0000046u)
+#define STATUS_INVALID_PAGE_PROTECTION ((status_t)0xC0000045u)
 #define STATUS_SEMAPHORE_LIMIT         ((status_t)0xC0000047u)
 #define STATUS_THREAD_IS_TERMINATING   ((status_t)0xC000004Bu)
 #define STATUS_DISK_FULL               ((status_t)0xC000007Fu)

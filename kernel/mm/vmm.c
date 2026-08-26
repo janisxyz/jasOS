@@ -20,9 +20,18 @@
  *    on the fault path, not at NtAllocate.
  *  - VAD array is 64 entries. A mapping bomb fails closed on VAD count
  *    or USER_COMMIT_MAX (32 MiB), whichever hits first.
+ *  - Protect/free of a range that spans two already-split VADs with a
+ *    hole between them is CONFLICTING. Coalesce only joins adjacent
+ *    same-prot VADs after protect; it does not walk a range of mixed
+ *    VADs in one syscall.
  */
 
 static aspace_t g_kernel_as;
+
+#ifndef JASOS_HOST
+static void unmap_range_locked(aspace_t *as, virt_t va, u64 n_pages);
+static void apply_prot_range(aspace_t *as, virt_t base, u64 size, u32 prot);
+#endif
 
 static int vad_lookup(aspace_t *as, virt_t page)
 {
@@ -32,6 +41,119 @@ static int vad_lookup(aspace_t *as, virt_t page)
             return (int)i;
     }
     return -1;
+}
+
+/* Unique VAD that fully contains [base, end). -1 if none or empty. */
+static int vad_contains_range(aspace_t *as, virt_t base, virt_t end)
+{
+    if (!as || end <= base) return -1;
+    for (u32 i = 0; i < as->vad_count; i++) {
+        if (base >= as->vads[i].start && end <= as->vads[i].end)
+            return (int)i;
+    }
+    return -1;
+}
+
+static u32 vad_append(aspace_t *as, virt_t start, virt_t end, u32 prot, u32 type, u32 committed)
+{
+    u32 i = as->vad_count++;
+    as->vads[i].start = start;
+    as->vads[i].end = end;
+    as->vads[i].prot = prot;
+    as->vads[i].type = type;
+    as->vads[i].committed = committed;
+#ifdef JASOS_HOST
+    as->host_pages[i] = NULL;
+    as->host_npages[i] = (u32)((end - start) / PAGE_SIZE);
+#endif
+    return i;
+}
+
+static void vad_remove_at(aspace_t *as, u32 i)
+{
+#ifdef JASOS_HOST
+    as->host_pages[i] = as->host_pages[as->vad_count - 1];
+    as->host_npages[i] = as->host_npages[as->vad_count - 1];
+    as->host_pages[as->vad_count - 1] = NULL;
+    as->host_npages[as->vad_count - 1] = 0;
+#endif
+    as->vads[i] = as->vads[--as->vad_count];
+}
+
+/*
+ * Collapse adjacent VADs with identical prot/type. Without this, a
+ * middle protect then a restore leaves three RW VADs and the original
+ * range can no longer be named in one NtProtect. Touched host shadows
+ * concatenate; kalloc failure leaves them split (not a security fail).
+ */
+static void vad_coalesce(aspace_t *as)
+{
+    for (;;) {
+        int keep = -1, eat = -1;
+        u32 nk = 0, ne = 0;
+        spin_lock(&as->lock);
+        for (u32 i = 0; i < as->vad_count && keep < 0; i++) {
+            for (u32 j = 0; j < as->vad_count; j++) {
+                if (i == j) continue;
+                if (as->vads[i].end == as->vads[j].start &&
+                    as->vads[i].prot == as->vads[j].prot &&
+                    as->vads[i].type == as->vads[j].type &&
+                    as->vads[i].committed == as->vads[j].committed) {
+                    keep = (int)i;
+                    eat = (int)j;
+                    nk = (u32)((as->vads[i].end - as->vads[i].start) / PAGE_SIZE);
+                    ne = (u32)((as->vads[j].end - as->vads[j].start) / PAGE_SIZE);
+                    break;
+                }
+            }
+        }
+        if (keep < 0) {
+            spin_unlock(&as->lock);
+            return;
+        }
+#ifdef JASOS_HOST
+        int need = (as->host_pages[keep] != NULL) || (as->host_pages[eat] != NULL);
+        u8 **old_k = as->host_pages[keep];
+        u8 **old_e = as->host_pages[eat];
+        spin_unlock(&as->lock);
+        u8 **comb = NULL;
+        if (need) {
+            comb = kalloc_zero((nk + ne) * sizeof(u8 *));
+            if (!comb) return;
+        }
+        spin_lock(&as->lock);
+        if (keep >= (int)as->vad_count || eat >= (int)as->vad_count ||
+            as->vads[keep].end != as->vads[eat].start ||
+            as->vads[keep].prot != as->vads[eat].prot) {
+            spin_unlock(&as->lock);
+            kfree(comb);
+            return;
+        }
+        if (comb) {
+            u8 **hk = as->host_pages[keep];
+            u8 **he = as->host_pages[eat];
+            for (u32 p = 0; p < nk; p++)
+                comb[p] = hk ? hk[p] : NULL;
+            for (u32 p = 0; p < ne; p++)
+                comb[nk + p] = he ? he[p] : NULL;
+            as->host_pages[keep] = comb;
+            as->host_npages[keep] = nk + ne;
+            as->host_pages[eat] = NULL;
+            as->host_npages[eat] = 0;
+        }
+        as->vads[keep].end = as->vads[eat].end;
+        vad_remove_at(as, (u32)eat);
+        spin_unlock(&as->lock);
+        if (old_k && old_k != comb) kfree(old_k);
+        if (old_e && old_e != comb) kfree(old_e);
+#else
+        as->vads[keep].end = as->vads[eat].end;
+        vad_remove_at(as, (u32)eat);
+        spin_unlock(&as->lock);
+        (void)nk;
+        (void)ne;
+#endif
+    }
 }
 
 #ifndef JASOS_HOST
@@ -117,7 +239,11 @@ bool vmm_probe_user(aspace_t *as, virt_t va, u64 n, bool write)
         }
         any = 1;
         u32 prot = as->vads[idx].prot;
+        if (prot & PAGE_NOACCESS) return false;
         if (write && !(prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+            return false;
+        if (!write && !(prot & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE |
+                                PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
             return false;
     }
     if (any) return true;
@@ -421,7 +547,45 @@ status_t vmm_map(aspace_t *as, virt_t va, phys_t pa, u64 n_pages, u64 flags)
 
 status_t vmm_unmap(aspace_t *as, virt_t va, u64 n_pages)
 {
+    /* T15 start: small unmaps collect frames, drop VMM, then pmm_free.
+       Rank inversion (VMM then PMM) remains for n_pages > 16 and for
+       vmm_free_user which must unmap under the lock to keep the hole. */
+    if (n_pages <= 16) {
+        phys_t frames[16];
+        u32 nf = 0;
+        spin_lock(&as->lock);
+        for (u64 i = 0; i < n_pages; i++) {
+            virt_t page = va + i * PAGE_SIZE;
+            u64 *pte = walk_alloc(as->cr3_phys, page, false);
+            if (!pte) continue;
+            phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
+            *pte = 0;
+            if (pa)
+                frames[nf++] = pa;
+            u64 cur_cr3;
+            __asm__ volatile("mov %%cr3, %0" : "=r"(cur_cr3));
+            if (cur_cr3 == as->cr3_phys)
+                __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
+        }
+        spin_unlock(&as->lock);
+        for (u32 i = 0; i < nf; i++)
+            pmm_free(frames[i], 0);
+        return STATUS_SUCCESS;
+    }
     spin_lock(&as->lock);
+    unmap_range_locked(as, va, n_pages);
+    spin_unlock(&as->lock);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Clear PTEs and free frames. Caller holds as->lock.
+ * Rank: pmm_free takes PMM while we hold VMM. Existing since T6.
+ * Unmapping after dropping the lock lets NtAllocate steal the hole
+ * and then we free the new frames. Residual: frame-list then drop.
+ */
+static void unmap_range_locked(aspace_t *as, virt_t va, u64 n_pages)
+{
     for (u64 i = 0; i < n_pages; i++) {
         virt_t page = va + i * PAGE_SIZE;
         u64 *pte = walk_alloc(as->cr3_phys, page, false);
@@ -434,11 +598,38 @@ status_t vmm_unmap(aspace_t *as, virt_t va, u64 n_pages)
             if (cur_cr3 == as->cr3_phys)
                 __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
         } else if (pte) {
-            *pte = 0; /* proto PTE_SW_COMMIT, no frame */
+            phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
+            *pte = 0;
+            if (pa)
+                pmm_free(pa, 0); /* NOACCESS'd frame sitting in proto PTE */
         }
     }
-    spin_unlock(&as->lock);
-    return STATUS_SUCCESS;
+}
+
+/*
+ * Retarget present PTEs in [base, base+size). Proto-only leaves stay
+ * proto; prot lives on the VAD and populate will pick it up.
+ * A NOACCESS'd frame (pa != 0, PTE_P clear) is restored when prot
+ * becomes accessible again — T13 left that frame leaked.
+ */
+static void apply_prot_range(aspace_t *as, virt_t base, u64 size, u32 prot)
+{
+    for (u64 off = 0; off < size; off += PAGE_SIZE) {
+        virt_t page = base + off;
+        u64 *pte = walk_alloc(as->cr3_phys, page, false);
+        if (!pte) continue;
+        phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
+        if (prot & PAGE_NOACCESS) {
+            if (*pte & PTE_P)
+                *pte = pa | PTE_SW_COMMIT | PTE_NX;
+            __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
+            continue;
+        }
+        if ((*pte & PTE_P) || pa) {
+            *pte = pa | pte_flags_from_prot(prot);
+            __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
+        }
+    }
 }
 
 /*
@@ -580,6 +771,7 @@ static status_t vmm_populate_page(aspace_t *as, virt_t page, bool write)
     int idx = vad_lookup(as, page);
     if (idx < 0) return STATUS_ACCESS_VIOLATION;
     u32 prot = as->vads[idx].prot;
+    if (prot & PAGE_NOACCESS) return STATUS_ACCESS_VIOLATION;
     if (write && !(prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
         return STATUS_ACCESS_VIOLATION;
 #ifdef JASOS_HOST
@@ -687,28 +879,192 @@ status_t vmm_alloc_user(process_t *p, virt_t *base, u64 size, u32 prot, u32 type
 status_t vmm_free_user(process_t *p, virt_t base, u64 size)
 {
     if (!p) return STATUS_INVALID_PARAMETER;
-    (void)size;
+    base = PAGE_ALIGN_DOWN(base);
+    if (size)
+        size = PAGE_ALIGN_UP(size);
+    if (base > USER_CANONICAL_TOP)
+        return STATUS_CONFLICTING_ADDRESSES;
+    if (size && (base + size < base || base + size - 1 > USER_CANONICAL_TOP))
+        return STATUS_CONFLICTING_ADDRESSES;
+
     aspace_t *as = &p->aspace;
-    for (u32 i = 0; i < as->vad_count; i++) {
-        if (as->vads[i].start == base) {
-            u64 pages = (as->vads[i].end - as->vads[i].start) / PAGE_SIZE;
-            vmm_unmap(as, as->vads[i].start, pages);
 #ifdef JASOS_HOST
-            host_pages_free(as, i);
-            as->host_pages[i] = as->host_pages[as->vad_count - 1];
-            as->host_npages[i] = as->host_npages[as->vad_count - 1];
-            as->host_pages[as->vad_count - 1] = NULL;
-            as->host_npages[as->vad_count - 1] = 0;
+    u8 **arr_left = NULL, **arr_right = NULL;
+    u8 **drop_arr = NULL;
+    u32 drop_lo = 0, drop_hi = 0;
 #endif
-            if (as->committed_pages >= pages)
-                as->committed_pages -= pages;
-            else
-                as->committed_pages = 0;
-            as->vads[i] = as->vads[--as->vad_count];
-            return STATUS_SUCCESS;
+
+    spin_lock(&as->lock);
+    int idx;
+    virt_t a, d, end;
+    u32 n_left, n_mid, n_right, extra;
+    u32 typ, com, old_prot;
+
+    if (size == 0) {
+        idx = -1;
+        for (u32 i = 0; i < as->vad_count; i++) {
+            if (as->vads[i].start == base) {
+                idx = (int)i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            spin_unlock(&as->lock);
+            return STATUS_INVALID_PARAMETER;
+        }
+        a = as->vads[idx].start;
+        d = as->vads[idx].end;
+        end = d;
+        n_left = 0;
+        n_mid = (u32)((d - a) / PAGE_SIZE);
+        n_right = 0;
+    } else {
+        end = base + size;
+        idx = vad_contains_range(as, base, end);
+        if (idx < 0) {
+            spin_unlock(&as->lock);
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
+        a = as->vads[idx].start;
+        d = as->vads[idx].end;
+        n_left = (u32)((base - a) / PAGE_SIZE);
+        n_mid = (u32)(size / PAGE_SIZE);
+        n_right = (u32)((d - end) / PAGE_SIZE);
+    }
+    if (n_mid == 0) {
+        spin_unlock(&as->lock);
+        return STATUS_INVALID_PARAMETER;
+    }
+    typ = as->vads[idx].type;
+    com = as->vads[idx].committed;
+    old_prot = as->vads[idx].prot;
+    extra = (n_left && n_right) ? 1u : 0u;
+    if (as->vad_count + extra > MAX_VADS) {
+        spin_unlock(&as->lock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+#ifdef JASOS_HOST
+    int populated = as->host_pages[idx] != NULL;
+    int need_arr = populated && (n_left || n_right);
+    if (need_arr) {
+        spin_unlock(&as->lock);
+        if (n_left) {
+            arr_left = kalloc_zero(n_left * sizeof(u8 *));
+            if (!arr_left) return STATUS_NO_MEMORY;
+        }
+        if (n_right) {
+            arr_right = kalloc_zero(n_right * sizeof(u8 *));
+            if (!arr_right) {
+                kfree(arr_left);
+                return STATUS_NO_MEMORY;
+            }
+        }
+        spin_lock(&as->lock);
+        if (idx >= (int)as->vad_count ||
+            as->vads[idx].start != a || as->vads[idx].end != d) {
+            spin_unlock(&as->lock);
+            kfree(arr_left);
+            kfree(arr_right);
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
+        if (as->vad_count + extra > MAX_VADS) {
+            spin_unlock(&as->lock);
+            kfree(arr_left);
+            kfree(arr_right);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        if (as->host_pages[idx] && ((n_left && !arr_left) || (n_right && !arr_right))) {
+            spin_unlock(&as->lock);
+            kfree(arr_left);
+            kfree(arr_right);
+            return STATUS_NO_MEMORY;
         }
     }
-    return STATUS_INVALID_PARAMETER;
+
+    u8 **oldp = as->host_pages[idx];
+    if (oldp) {
+        if (n_left && arr_left) {
+            for (u32 i = 0; i < n_left; i++)
+                arr_left[i] = oldp[i];
+        }
+        if (n_right && arr_right) {
+            for (u32 i = 0; i < n_right; i++)
+                arr_right[i] = oldp[n_left + n_mid + i];
+        }
+        drop_arr = oldp;
+        drop_lo = n_left;
+        drop_hi = n_left + n_mid;
+        as->host_pages[idx] = NULL;
+        as->host_npages[idx] = 0;
+    }
+#else
+    (void)typ;
+    (void)com;
+    (void)old_prot;
+#endif
+
+    if (n_left && n_right) {
+        as->vads[idx].start = a;
+        as->vads[idx].end = base;
+        as->vads[idx].prot = old_prot;
+#ifdef JASOS_HOST
+        as->host_pages[idx] = arr_left ? arr_left : as->host_pages[idx];
+        as->host_npages[idx] = n_left;
+        arr_left = NULL;
+#endif
+        u32 j = vad_append(as, end, d, old_prot, typ, com);
+#ifdef JASOS_HOST
+        as->host_pages[j] = arr_right;
+        as->host_npages[j] = n_right;
+        arr_right = NULL;
+#else
+        (void)j;
+#endif
+    } else if (n_left) {
+        as->vads[idx].end = base;
+#ifdef JASOS_HOST
+        as->host_pages[idx] = arr_left;
+        as->host_npages[idx] = n_left;
+        arr_left = NULL;
+#endif
+    } else if (n_right) {
+        as->vads[idx].start = end;
+#ifdef JASOS_HOST
+        as->host_pages[idx] = arr_right;
+        as->host_npages[idx] = n_right;
+        arr_right = NULL;
+#endif
+    } else {
+#ifdef JASOS_HOST
+        as->host_pages[idx] = as->host_pages[as->vad_count - 1];
+        as->host_npages[idx] = as->host_npages[as->vad_count - 1];
+        as->host_pages[as->vad_count - 1] = NULL;
+        as->host_npages[as->vad_count - 1] = 0;
+#endif
+        as->vads[idx] = as->vads[--as->vad_count];
+    }
+
+#ifndef JASOS_HOST
+    unmap_range_locked(as, base, n_mid);
+#endif
+    if (as->committed_pages >= n_mid)
+        as->committed_pages -= n_mid;
+    else
+        as->committed_pages = 0;
+    spin_unlock(&as->lock);
+
+#ifdef JASOS_HOST
+    if (drop_arr) {
+        for (u32 i = drop_lo; i < drop_hi; i++) {
+            if (drop_arr[i]) kfree(drop_arr[i]);
+        }
+        kfree(drop_arr);
+    }
+    kfree(arr_left);
+    kfree(arr_right);
+#endif
+    return STATUS_SUCCESS;
 }
 
 status_t vmm_write_aspace(aspace_t *as, virt_t va, const void *src, u64 n)
@@ -794,5 +1150,162 @@ status_t vmm_read_aspace(aspace_t *as, void *dst, virt_t va, u64 n)
 aspace_t *vmm_kernel_aspace(void)
 {
     return &g_kernel_as;
+}
+
+static int prot_legal(u32 prot)
+{
+    if (prot & PAGE_EXECUTE_READWRITE) return 0;
+    if (prot & PAGE_NOACCESS) return 1;
+    if (prot & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE | PAGE_EXECUTE_READ))
+        return 1;
+    return 0;
+}
+
+status_t vmm_protect_user(process_t *p, virt_t base, u64 size, u32 prot, u32 *old_prot)
+{
+    if (!p || size == 0) return STATUS_INVALID_PARAMETER;
+    if (!prot_legal(prot)) return STATUS_INVALID_PAGE_PROTECTION;
+    base = PAGE_ALIGN_DOWN(base);
+    size = PAGE_ALIGN_UP(size);
+    if (base > USER_CANONICAL_TOP || base + size < base ||
+        (size && base + size - 1 > USER_CANONICAL_TOP))
+        return STATUS_CONFLICTING_ADDRESSES;
+    virt_t end = base + size;
+    aspace_t *as = &p->aspace;
+#ifdef JASOS_HOST
+    u8 **arr_left = NULL, **arr_mid = NULL, **arr_right = NULL;
+    u8 **drop_old = NULL;
+#endif
+
+    spin_lock(&as->lock);
+    int idx = vad_contains_range(as, base, end);
+    if (idx < 0) {
+        spin_unlock(&as->lock);
+        return STATUS_CONFLICTING_ADDRESSES;
+    }
+    virt_t a = as->vads[idx].start;
+    virt_t d = as->vads[idx].end;
+    u32 old = as->vads[idx].prot;
+    u32 typ = as->vads[idx].type;
+    u32 com = as->vads[idx].committed;
+    u32 n_left = (u32)((base - a) / PAGE_SIZE);
+    u32 n_mid = (u32)(size / PAGE_SIZE);
+    u32 n_right = (u32)((d - end) / PAGE_SIZE);
+    u32 extra = (n_left ? 1u : 0u) + (n_right ? 1u : 0u);
+    if (as->vad_count + extra > MAX_VADS) {
+        spin_unlock(&as->lock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (extra == 0) {
+        if (old_prot) *old_prot = old;
+        as->vads[idx].prot = prot;
+#ifndef JASOS_HOST
+        apply_prot_range(as, base, size, prot);
+#endif
+        spin_unlock(&as->lock);
+        vad_coalesce(as);
+        return STATUS_SUCCESS;
+    }
+
+#ifdef JASOS_HOST
+    int populated = as->host_pages[idx] != NULL;
+    spin_unlock(&as->lock);
+    if (populated) {
+        if (n_left) {
+            arr_left = kalloc_zero(n_left * sizeof(u8 *));
+            if (!arr_left) return STATUS_NO_MEMORY;
+        }
+        arr_mid = kalloc_zero(n_mid * sizeof(u8 *));
+        if (!arr_mid) {
+            kfree(arr_left);
+            return STATUS_NO_MEMORY;
+        }
+        if (n_right) {
+            arr_right = kalloc_zero(n_right * sizeof(u8 *));
+            if (!arr_right) {
+                kfree(arr_left);
+                kfree(arr_mid);
+                return STATUS_NO_MEMORY;
+            }
+        }
+    }
+    spin_lock(&as->lock);
+    if (idx >= (int)as->vad_count ||
+        as->vads[idx].start != a || as->vads[idx].end != d) {
+        spin_unlock(&as->lock);
+        kfree(arr_left);
+        kfree(arr_mid);
+        kfree(arr_right);
+        return STATUS_CONFLICTING_ADDRESSES;
+    }
+    if (as->vad_count + extra > MAX_VADS) {
+        spin_unlock(&as->lock);
+        kfree(arr_left);
+        kfree(arr_mid);
+        kfree(arr_right);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (as->host_pages[idx] && (!arr_mid || (n_left && !arr_left) || (n_right && !arr_right))) {
+        spin_unlock(&as->lock);
+        kfree(arr_left);
+        kfree(arr_mid);
+        kfree(arr_right);
+        return STATUS_NO_MEMORY;
+    }
+    drop_old = as->host_pages[idx];
+    if (drop_old) {
+        for (u32 i = 0; i < n_left; i++)
+            arr_left[i] = drop_old[i];
+        for (u32 i = 0; i < n_mid; i++)
+            arr_mid[i] = drop_old[n_left + i];
+        for (u32 i = 0; i < n_right; i++)
+            arr_right[i] = drop_old[n_left + n_mid + i];
+    }
+#else
+    /* hardware: still holding as->lock from the first acquire. */
+#endif
+
+    if (old_prot) *old_prot = old;
+    as->vads[idx].start = base;
+    as->vads[idx].end = end;
+    as->vads[idx].prot = prot;
+#ifdef JASOS_HOST
+    as->host_pages[idx] = arr_mid;
+    as->host_npages[idx] = n_mid;
+    arr_mid = NULL;
+#endif
+    if (n_left) {
+        u32 j = vad_append(as, a, base, old, typ, com);
+#ifdef JASOS_HOST
+        as->host_pages[j] = arr_left;
+        as->host_npages[j] = n_left;
+        arr_left = NULL;
+#else
+        (void)j;
+#endif
+    }
+    if (n_right) {
+        u32 j = vad_append(as, end, d, old, typ, com);
+#ifdef JASOS_HOST
+        as->host_pages[j] = arr_right;
+        as->host_npages[j] = n_right;
+        arr_right = NULL;
+#else
+        (void)j;
+#endif
+    }
+#ifndef JASOS_HOST
+    apply_prot_range(as, base, size, prot);
+#endif
+    spin_unlock(&as->lock);
+#ifdef JASOS_HOST
+    kfree(drop_old);
+    kfree(arr_left);
+    kfree(arr_mid);
+    kfree(arr_right);
+#endif
+    vad_coalesce(as);
+    return STATUS_SUCCESS;
 }
 

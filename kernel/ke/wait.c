@@ -17,7 +17,9 @@
  * a SCHED acquire without the T3 ranking (DISP=9 < SCHED=10);
  * WaitForMultiple enqueues a wait_block on every object;
  * owner death abandons every mutex on the thread's owned list;
- * a higher-priority waiter donates to the mutex owner (sched_boost).
+ * a higher-priority waiter donates to the mutex owner (sched_boost);
+ * WAIT_ALL treats a mutex the caller already owns as satisfied
+ * (signal_state is 0 while held; polling used to TIMEOUT).
  */
 
 void ke_mutex_own(mutex_object_t *m, thread_t *t)
@@ -62,6 +64,16 @@ static void mutex_donate(mutex_object_t *m, thread_t *waiter)
         owner->saved_priority = owner->priority;
     owner->wait_boost = 1;
     sched_boost(owner, waiter->priority);
+}
+
+static int disp_satisfied(dispatcher_t *d, thread_t *t)
+{
+    if (!d) return 0;
+    if (d->type == DISP_MUTANT) {
+        mutex_object_t *m = CONTAINER_OF(d, mutex_object_t, disp);
+        if (m->owner == t) return 1;
+    }
+    return d->signal_state > 0;
 }
 
 status_t ke_wait_object(dispatcher_t *d, u64 timeout_ticks)
@@ -205,7 +217,7 @@ status_t ke_wait_multiple(dispatcher_t **objs, u32 count, bool wait_all, u64 tim
         u32 got = 0;
         for (u32 i = 0; i < count; i++) {
             spin_lock(&objs[i]->lock);
-            if (objs[i]->signal_state > 0) got++;
+            if (disp_satisfied(objs[i], t)) got++;
             spin_unlock(&objs[i]->lock);
         }
         if (got == count) {

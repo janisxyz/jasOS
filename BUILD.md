@@ -101,6 +101,10 @@ last-writer EOF.
 priority inheritance, `NtTerminateThread` by handle, handle inherit,
 and per-page host shadow (1 MiB VAD + 1 byte write).
 
+0.14 selftest also covers VAD split (prefix/middle/suffix protect and
+free), coalesce after restore, size-0 whole-VAD free, and WAIT_ALL
+on a mutex the caller already owns.
+
 
 ```
 ./build/jasos-host

@@ -341,6 +341,25 @@ status_t NtAllocateVirtualMemory(handle_t proc, virt_t *base, u64 size, u32 prot
     return vmm_alloc_user(p, base, size, prot ? prot : PAGE_READWRITE, MEM_COMMIT);
 }
 
+status_t NtProtectVirtualMemory(handle_t proc, virt_t base, u64 size, u32 prot, u32 *old_prot)
+{
+    process_t *p;
+    object_t *held = NULL;
+    if (proc == HANDLE_CURRENT) p = ke_current_process();
+    else {
+        status_t st = ht_lookup(cur_ht(), proc, PROCESS_VM_OPERATION, OBJ_PROCESS, &held);
+        if (!NT_SUCCESS(st)) return st;
+        p = (process_t *)held;
+    }
+    if (!p || size == 0) {
+        if (held) ob_dereference(held);
+        return STATUS_INVALID_PARAMETER;
+    }
+    status_t st = vmm_protect_user(p, base, size, prot, old_prot);
+    if (held) ob_dereference(held);
+    return st;
+}
+
 status_t NtQueryInformationProcess(handle_t h, void *buf, u64 n)
 {
     process_t *p;
@@ -709,6 +728,15 @@ status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5
         if (a3 < sizeof(inf)) return STATUS_INFO_LENGTH_MISMATCH;
         memcpy((void *)(uintptr_t)a2, &inf, sizeof(inf));
         return STATUS_SUCCESS;
+    }
+    case SYS_NtProtectVirtualMemory: {
+        u32 old = 0;
+        status_t st = NtProtectVirtualMemory((handle_t)a0, (virt_t)a1, a2, (u32)a3, &old);
+        if (NT_SUCCESS(st) && a4) {
+            if (caller_user()) copyout((virt_t)a4, &old, sizeof(old));
+            else *(u32 *)(uintptr_t)a4 = old;
+        }
+        return st;
     }
     default:                       return STATUS_INVALID_SYSTEM_SERVICE;
     }

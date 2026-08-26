@@ -51,5 +51,6 @@
     SYSCALL_STUB NtSetTimer,                 34
     SYSCALL_STUB NtCancelTimer,              35
     SYSCALL_STUB NtWaitForMultipleObjects,   36
+    SYSCALL_STUB NtProtectVirtualMemory,     37
 
     .section .note.GNU-stack, "", @progbits

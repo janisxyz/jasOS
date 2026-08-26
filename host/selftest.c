@@ -359,6 +359,24 @@ int selftest_run(void)
         NtClose(b);
     }
 
+    /* WAIT_ALL: a mutex the caller already owns counts as signaled.
+       Poll (timeout 0) used to return TIMEOUT because signal_state is 0
+       while owned. */
+    {
+        handle_t mh = 0, eh = 0;
+        st = NtCreateMutex(&mh, NULL, true);
+        EXPECT(NT_SUCCESS(st) && mh, "wfmo-all owned mutex");
+        st = NtCreateEvent(&eh, NULL, false, true);
+        EXPECT(NT_SUCCESS(st) && eh, "wfmo-all owned event");
+        handle_t pair[2] = { mh, eh };
+        st = NtWaitForMultipleObjects(pair, 2, true, 0);
+        EXPECT(NT_SUCCESS(st), "wfmo-all owned mutex is satisfied");
+        NtReleaseMutex(mh);
+        NtReleaseMutex(mh); /* recursion from the WAIT_ALL consume */
+        NtClose(mh);
+        NtClose(eh);
+    }
+
     /* WFMO bounds: 0 and 17 fail closed. */
     {
         handle_t dummy = 0;
@@ -684,6 +702,168 @@ int selftest_run(void)
         EXPECT(psp_system_process()->handles.slots[i].inherit, "dup inherit bit");
         NtClose(e2);
         NtClose(e);
+    }
+
+    /* NtProtectVirtualMemory: whole-VAD, refuse W^X, NOACCESS kills probe.
+       T14: subrange split is real. */
+    {
+        handle_t ph = 0;
+        st = NtCreateProcess(&ph, PROCESS_ALL_ACCESS, "/bin/hello", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st) && ph, "protect proc");
+        object_t *o = NULL;
+        st = ht_lookup(&psp_system_process()->handles, ph, 0, OBJ_PROCESS, &o);
+        EXPECT(NT_SUCCESS(st) && o, "protect proc lookup");
+        process_t *pp = (process_t *)o;
+        virt_t pv = 0x0000000006000000ULL;
+        st = vmm_alloc_user(pp, &pv, 2u * PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+        EXPECT(NT_SUCCESS(st), "protect alloc");
+        char w = 0x11;
+        st = vmm_write_aspace(&pp->aspace, pv, &w, 1);
+        EXPECT(NT_SUCCESS(st), "protect write before");
+        u32 oldp = 0;
+        st = NtProtectVirtualMemory(ph, pv, 2u * PAGE_SIZE, PAGE_READONLY, &oldp);
+        EXPECT(NT_SUCCESS(st) && oldp == PAGE_READWRITE, "protect to RO");
+        EXPECT(!vmm_handle_user_fault(&pp->aspace, pv, true), "protect RO write fault");
+        st = NtProtectVirtualMemory(ph, pv, 2u * PAGE_SIZE, PAGE_EXECUTE_READWRITE, &oldp);
+        EXPECT(st == STATUS_INVALID_PAGE_PROTECTION, "protect W^X refused");
+        st = NtProtectVirtualMemory(ph, pv, 2u * PAGE_SIZE, PAGE_NOACCESS, &oldp);
+        EXPECT(NT_SUCCESS(st), "protect NOACCESS");
+        EXPECT(!vmm_probe_user(&pp->aspace, pv, 1, false), "NOACCESS probe");
+        st = NtProtectVirtualMemory(ph, pv, 2u * PAGE_SIZE, PAGE_READWRITE, &oldp);
+        EXPECT(NT_SUCCESS(st) && oldp == PAGE_NOACCESS, "protect restore from NOACCESS");
+        EXPECT(vmm_probe_user(&pp->aspace, pv, 1, true), "restored RW probe");
+        st = vmm_free_user(pp, pv, 2u * PAGE_SIZE);
+        EXPECT(NT_SUCCESS(st), "protect free");
+
+        /* Subrange split: 4 pages, protect the middle 2 to RO. */
+        virt_t sp = 0x0000000006100000ULL;
+        st = vmm_alloc_user(pp, &sp, 4u * PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+        EXPECT(NT_SUCCESS(st), "split alloc 4 pages");
+        u32 vads0 = pp->aspace.vad_count;
+        unsigned char fill[4] = { 0xA0, 0xA1, 0xA2, 0xA3 };
+        for (u32 i = 0; i < 4; i++) {
+            st = vmm_write_aspace(&pp->aspace, sp + i * PAGE_SIZE, &fill[i], 1);
+            EXPECT(NT_SUCCESS(st), i == 0 ? "split write p0" :
+                                  i == 1 ? "split write p1" :
+                                  i == 2 ? "split write p2" : "split write p3");
+        }
+        oldp = 0;
+        st = NtProtectVirtualMemory(ph, sp + PAGE_SIZE, 2u * PAGE_SIZE, PAGE_READONLY, &oldp);
+        EXPECT(NT_SUCCESS(st) && oldp == PAGE_READWRITE, "split protect middle RO");
+        EXPECT(pp->aspace.vad_count == vads0 + 2, "split produced 3 VADs");
+        memory_basic_information_t mbi;
+        st = NtQueryVirtualMemory(ph, sp, &mbi, sizeof(mbi));
+        EXPECT(NT_SUCCESS(st) && mbi.prot == PAGE_READWRITE &&
+               mbi.region_size == PAGE_SIZE, "split query left RW 1 page");
+        st = NtQueryVirtualMemory(ph, sp + PAGE_SIZE, &mbi, sizeof(mbi));
+        EXPECT(NT_SUCCESS(st) && mbi.prot == PAGE_READONLY &&
+               mbi.region_size == 2u * PAGE_SIZE, "split query mid RO 2 pages");
+        st = NtQueryVirtualMemory(ph, sp + 3u * PAGE_SIZE, &mbi, sizeof(mbi));
+        EXPECT(NT_SUCCESS(st) && mbi.prot == PAGE_READWRITE &&
+               mbi.region_size == PAGE_SIZE, "split query right RW 1 page");
+        EXPECT(vmm_handle_user_fault(&pp->aspace, sp, true), "split left still writable");
+        EXPECT(!vmm_handle_user_fault(&pp->aspace, sp + PAGE_SIZE, true),
+               "split mid write fault");
+        EXPECT(!vmm_handle_user_fault(&pp->aspace, sp + 2u * PAGE_SIZE, true),
+               "split mid2 write fault");
+        EXPECT(vmm_handle_user_fault(&pp->aspace, sp + 3u * PAGE_SIZE, true),
+               "split right still writable");
+        unsigned char back = 0;
+        st = vmm_read_aspace(&pp->aspace, &back, sp + PAGE_SIZE, 1);
+        EXPECT(NT_SUCCESS(st) && back == 0xA1, "split mid data survived");
+
+        /* Restore middle to RW; coalesce must glue the three RW VADs
+           so the original 4-page range is nameable again. */
+        {
+            virt_t cq = 0x0000000006300000ULL;
+            st = vmm_alloc_user(pp, &cq, 4u * PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+            EXPECT(NT_SUCCESS(st), "coalesce alloc");
+            u32 oldc = 0;
+            st = NtProtectVirtualMemory(ph, cq + PAGE_SIZE, 2u * PAGE_SIZE, PAGE_READONLY, &oldc);
+            EXPECT(NT_SUCCESS(st), "coalesce split middle");
+            EXPECT(pp->aspace.vad_count >= 3, "coalesce has pieces");
+            st = NtProtectVirtualMemory(ph, cq + PAGE_SIZE, 2u * PAGE_SIZE, PAGE_READWRITE, &oldc);
+            EXPECT(NT_SUCCESS(st) && oldc == PAGE_READONLY, "coalesce restore middle RW");
+            memory_basic_information_t mb2;
+            st = NtQueryVirtualMemory(ph, cq, &mb2, sizeof(mb2));
+            EXPECT(NT_SUCCESS(st) && mb2.region_size == 4u * PAGE_SIZE &&
+                   mb2.prot == PAGE_READWRITE, "coalesce glued 4 pages");
+            st = NtProtectVirtualMemory(ph, cq, 4u * PAGE_SIZE, PAGE_READONLY, &oldc);
+            EXPECT(NT_SUCCESS(st) && oldc == PAGE_READWRITE, "coalesce whole range nameable");
+            st = vmm_free_user(pp, cq, 0);
+            EXPECT(NT_SUCCESS(st), "coalesce free");
+        }
+
+        /* Prefix protect of the right 1-page VAD. */
+        st = NtProtectVirtualMemory(ph, sp + 3u * PAGE_SIZE, PAGE_SIZE, PAGE_READONLY, &oldp);
+        EXPECT(NT_SUCCESS(st) && oldp == PAGE_READWRITE, "split prefix/exact right to RO");
+
+        /* Free the middle 2 pages; left and right remain. */
+        u64 commit0 = pp->aspace.committed_pages;
+        st = vmm_free_user(pp, sp + PAGE_SIZE, 2u * PAGE_SIZE);
+        EXPECT(NT_SUCCESS(st), "split free middle");
+        EXPECT(pp->aspace.committed_pages == commit0 - 2, "split free dropped commit");
+        st = vmm_read_aspace(&pp->aspace, &back, sp, 1);
+        EXPECT(NT_SUCCESS(st) && back == 0xA0, "split left survived free");
+        st = vmm_read_aspace(&pp->aspace, &back, sp + PAGE_SIZE, 1);
+        EXPECT(st == STATUS_ACCESS_VIOLATION, "split hole is gone");
+        st = vmm_read_aspace(&pp->aspace, &back, sp + 3u * PAGE_SIZE, 1);
+        EXPECT(NT_SUCCESS(st) && back == 0xA3, "split right survived free");
+
+        /* Hole can be reallocated. */
+        virt_t hole = sp + PAGE_SIZE;
+        st = vmm_alloc_user(pp, &hole, 2u * PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+        EXPECT(NT_SUCCESS(st) && hole == sp + PAGE_SIZE, "split hole realloc");
+
+        /* size 0 frees the whole VAD at base. */
+        st = vmm_free_user(pp, sp, 0);
+        EXPECT(NT_SUCCESS(st), "split free size 0 left");
+        st = vmm_read_aspace(&pp->aspace, &back, sp, 1);
+        EXPECT(st == STATUS_ACCESS_VIOLATION, "size 0 freed the left VAD");
+        st = vmm_read_aspace(&pp->aspace, &back, sp + PAGE_SIZE, 1);
+        EXPECT(NT_SUCCESS(st), "size 0 did not eat the hole realloc");
+
+        /* Range not in any VAD. */
+        st = vmm_free_user(pp, 0x0000000007000000ULL, PAGE_SIZE);
+        EXPECT(st == STATUS_CONFLICTING_ADDRESSES, "free miss is CONFLICTING");
+        st = NtProtectVirtualMemory(ph, 0x0000000007000000ULL, PAGE_SIZE, PAGE_READONLY, &oldp);
+        EXPECT(st == STATUS_CONFLICTING_ADDRESSES, "protect miss is CONFLICTING");
+
+        /* Prefix free of a 3-page VAD. */
+        virt_t pf = 0x0000000006200000ULL;
+        st = vmm_alloc_user(pp, &pf, 3u * PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+        EXPECT(NT_SUCCESS(st), "prefix-free alloc");
+        unsigned char c0 = 0xB0, c1 = 0xB1, c2 = 0xB2;
+        vmm_write_aspace(&pp->aspace, pf, &c0, 1);
+        vmm_write_aspace(&pp->aspace, pf + PAGE_SIZE, &c1, 1);
+        vmm_write_aspace(&pp->aspace, pf + 2u * PAGE_SIZE, &c2, 1);
+        st = vmm_free_user(pp, pf, PAGE_SIZE);
+        EXPECT(NT_SUCCESS(st), "prefix free first page");
+        st = vmm_read_aspace(&pp->aspace, &back, pf, 1);
+        EXPECT(st == STATUS_ACCESS_VIOLATION, "prefix free dropped page 0");
+        st = vmm_read_aspace(&pp->aspace, &back, pf + PAGE_SIZE, 1);
+        EXPECT(NT_SUCCESS(st) && back == 0xB1, "prefix free kept page 1");
+        st = vmm_read_aspace(&pp->aspace, &back, pf + 2u * PAGE_SIZE, 1);
+        EXPECT(NT_SUCCESS(st) && back == 0xB2, "prefix free kept page 2");
+        st = NtQueryVirtualMemory(ph, pf + PAGE_SIZE, &mbi, sizeof(mbi));
+        EXPECT(NT_SUCCESS(st) && mbi.base == pf + PAGE_SIZE &&
+               mbi.region_size == 2u * PAGE_SIZE, "prefix free shrunk VAD");
+
+        /* Suffix free. */
+        st = vmm_free_user(pp, pf + 2u * PAGE_SIZE, PAGE_SIZE);
+        EXPECT(NT_SUCCESS(st), "suffix free last page");
+        st = vmm_read_aspace(&pp->aspace, &back, pf + PAGE_SIZE, 1);
+        EXPECT(NT_SUCCESS(st) && back == 0xB1, "suffix free kept page 1");
+        st = vmm_read_aspace(&pp->aspace, &back, pf + 2u * PAGE_SIZE, 1);
+        EXPECT(st == STATUS_ACCESS_VIOLATION, "suffix free dropped page 2");
+
+        st = vmm_free_user(pp, pf + PAGE_SIZE, 0);
+        EXPECT(NT_SUCCESS(st), "size 0 remaining page");
+        st = vmm_free_user(pp, hole, 0);
+        EXPECT(NT_SUCCESS(st), "size 0 hole realloc");
+
+        ob_dereference(o);
+        NtClose(ph);
     }
 
     kprintf("selftest: all assertions passed\n");

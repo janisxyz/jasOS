@@ -208,6 +208,34 @@ See [BUILD.md](BUILD.md).
 | T12 | Handle inherit on `NtCreateProcess` | `slot.inherit` existed and was always 0 |
 | T12 | Host shadow is per-page | Whole-VAD `kalloc` was a mapping bomb the commit cap did not stop on host |
 | T12 | `ht_destroy` drops HANDLE before `kfree` | Last-thread exit paniced "heap while holding 7" |
+| T13 | `g_procs` holds a ref | `NtClose` of a process handle kfree'd the object while the table still walked it (0xAA poison pid) |
+| T13 | `NtProtectVirtualMemory` | Whole-VAD prot change; W^X refused; NOACCESS drops user probe; subrange split residual |
+| T14 | VAD split on protect/free | Exact-match protect was a lie; `vmm_free_user` ignored size and nuked the whole region |
+| T14 | Coalesce after protect | Restore-middle left three RW VADs; the original range could not be named |
+| T14 | WAIT_ALL owned mutex | `signal_state` is 0 while held; poll WAIT_ALL timed out on a mutex the caller owned |
+| T14 | NOACCESS frame restore | T13 parked the frame in a proto PTE then leaked it on the next RW protect |
+
+---
+
+## T14 surface (0.14.0)
+
+- `NtProtectVirtualMemory` / `vmm_free_user` split a containing VAD: prefix, suffix, or middle. Range must sit in one VAD (holes and multi-VAD spans are `CONFLICTING_ADDRESSES`).
+- `size == 0` on free is whole-VAD at `base` (NT `MEM_RELEASE`). `NtUnmapViewOfSection` uses it.
+- Adjacent same-prot VADs coalesce after protect so a split-then-restore is nameable as one range again.
+- Hardware `apply_prot_range` restores a NOACCESS'd frame (`pa != 0`, `PTE_P` clear) instead of leaking it on the next populate.
+- WAIT_ALL: a mutex the caller already owns counts as satisfied.
+
+Residual: protect still will not walk a run of mixed-prot VADs in one call; coalesce is same-prot adjacent only. Unmap still takes PMM while holding VMM.
+
+---
+
+## T13 surface (0.13.0)
+
+- `psp_create_process` takes a table ref on `g_procs`. Reap drops it. Close of the last handle no longer frees a live table entry.
+- Syscall 37 `NtProtectVirtualMemory`: exact-VAD only. `PAGE_EXECUTE_READWRITE` is `INVALID_PAGE_PROTECTION`. `PAGE_NOACCESS` fails `vmm_probe_user`. Hardware present pages are `invlpg`'d; NOACCESS clears `PTE_P` and keeps the frame in the PTE.
+- Residual: subrange protect does not split VADs (`NOT_SUPPORTED`).
+
+---
 
 ---
 
