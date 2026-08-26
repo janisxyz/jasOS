@@ -230,8 +230,14 @@ int sh_main(int argc, char **argv)
                         strlcat(path, av[0], PATH_MAX);
                     }
                     handle_t ph = 0;
-                    status_t st = NtCreateProcessEx(&ph, PROCESS_ALL_ACCESS, path, 0,
-                                                    (const char *const *)av, (u32)ac);
+                    const char *ev[] = { "PATH=/bin:/usr/bin", "HOME=/" };
+                    process_create_info_t inf;
+                    memset(&inf, 0, sizeof(inf));
+                    inf.argc = (u32)ac;
+                    inf.argv = (const char *const *)av;
+                    inf.envc = 2;
+                    inf.envp = ev;
+                    status_t st = NtCreateProcess2(&ph, PROCESS_ALL_ACCESS, path, 0, &inf);
                     if (!NT_SUCCESS(st))
                         kprintf("sh: %s: %s\n", av[0], status_name(st));
                     else {

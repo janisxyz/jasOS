@@ -51,6 +51,8 @@ Clone it. `make`. `make run`. That is how you boot it.
   `/bin/ls` `/bin/cat` `/bin/ps` `/bin/crash` are ET_EXEC
 - 0.18: `NtDeleteFile`; vnode refcount so unlink of an open file is
   not a UAF; init spawns sh as a child (pid 1 does not die with sh)
+- 0.19: envp on the user stack; syscall 43 `NtCreateProcess2` takes a
+  create-info block (syscall 6 still has no 7th argument)
 
 
 

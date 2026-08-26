@@ -100,6 +100,8 @@ typedef struct process {
     bool           user_mode;
     u32            argc;
     char           argv[USER_ARGC_MAX][USER_ARG_LEN];
+    u32            envc;
+    char           envv[USER_ENVC_MAX][USER_ENV_LEN];
     token_object_t *token;
 } process_t;
 

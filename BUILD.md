@@ -176,4 +176,8 @@ denied, create+delete+reopen fail, open-then-unlink handle still
 readable, nonempty dir `CANNOT_DELETE`, empty dir unlink, init-style
 `NtCreateProcess("/bin/sh")` is not pid 1 and not `user_mode`.
 
+0.19 selftest covers `NtCreateProcess2`: envc cap, envc without envp,
+PATH/HOME on the user stack, envc=0 still a single env NULL after
+argv NULL, syscall 43 dispatch, SYS_MAX out of range.
+
 

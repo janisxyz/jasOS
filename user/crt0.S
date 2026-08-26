@@ -8,6 +8,7 @@ _start:
     xor rbp, rbp
     pop rdi                 /* argc */
     mov rsi, rsp            /* argv */
+    lea rdx, [rsi + rdi*8 + 8]  /* envp = argv + argc + 1 (skip NULL) */
     and rsp, -16
     call main
     mov rdi, -1

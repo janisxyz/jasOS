@@ -57,5 +57,6 @@
     SYSCALL_STUB NtDuplicateToken,           40
     SYSCALL_STUB NtSetInformationToken,      41
     SYSCALL_STUB NtDeleteFile,               42
+    SYSCALL_STUB NtCreateProcess2,           43
 
     .section .note.GNU-stack, "", @progbits

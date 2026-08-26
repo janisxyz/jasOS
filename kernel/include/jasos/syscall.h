@@ -47,7 +47,17 @@
 #define SYS_NtDuplicateToken           40
 #define SYS_NtSetInformationToken      41
 #define SYS_NtDeleteFile               42
-#define SYS_MAX                        43
+#define SYS_NtCreateProcess2           43
+#define SYS_MAX                        44
+
+/* T23: spawn argv+envp without a 7th syscall register.
+ * Syscall 43 a4 is a pointer to this. argc/envc=0 with NULL vec is fine. */
+typedef struct process_create_info {
+    u32 argc;
+    u32 envc;
+    const char *const *argv;
+    const char *const *envp;
+} process_create_info_t;
 
 status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 *info);
 
@@ -77,6 +87,8 @@ status_t NtQueryInformationProcess(handle_t h, void *buf, u64 n);
 status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 flags);
 status_t NtCreateProcessEx(handle_t *out, access_t access, const char *image, u32 flags,
                            const char *const *argv, u32 argc);
+status_t NtCreateProcess2(handle_t *out, access_t access, const char *image, u32 flags,
+                          const process_create_info_t *info);
 status_t NtTerminateThread(handle_t h, status_t st);
 status_t NtDuplicateObject(handle_t src_proc, handle_t src, handle_t dst_proc, handle_t *out, access_t access, u32 flags);
 status_t NtQueryObject(handle_t h, void *buf, u64 n);

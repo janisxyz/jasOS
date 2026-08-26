@@ -230,4 +230,7 @@ vnode. A File object may outlive its directory entry; the handle
 is still a valid object until close. Devices and `/` are not
 deletable objects via this path — they fail at VFS, not at Ob.
 
+T23: Process body gained `envc` / `envv[USER_ENVC_MAX][USER_ENV_LEN]`.
+No new object type. Spawn still creates one Process + Token.
+
 

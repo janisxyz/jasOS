@@ -141,6 +141,7 @@ Max copyin size v1: 1 MiB. Bigger is `STATUS_INVALID_PARAMETER`.
 | 40 | `NtDuplicateToken` | src | access | out | | |
 | 41 | `NtSetInformationToken` | token | integrity | | | |
 | 42 | `NtDeleteFile` | path | | | | |
+| 43 | `NtCreateProcess2` | out | access | image | flags | `process_create_info *` |
 
 `-1` as a process/thread handle means current. Real handles are
 `(generation << 16) | (index << 2)`, never all-ones.
@@ -228,5 +229,11 @@ T19: no new syscall. `NtCreateProcess` still mints the child token from the
 T22: syscall 42 `NtDeleteFile` a0 path. `copyinstr` then `vfs_unlink`.
 SYS_MAX is 43. sh `rm` is this syscall, not a VFS call. No handle;
 no DELETE bit. Root and devices are `ACCESS_DENIED`.
+
+T23: syscall 43 `NtCreateProcess2` a0 out a1 access a2 image a3 flags
+a4 `process_create_info_t *` { argc, envc, argv, envp }. SYS_MAX is 44.
+Syscall 6 is unchanged. envc>`USER_ENVC_MAX` or envc>0 with envp=0 is
+`INVALID_PARAMETER`. Each env string is `copyinstr`'d into `USER_ENV_LEN`.
+crt0: rdi=argc rsi=argv rdx=envp.
 
 

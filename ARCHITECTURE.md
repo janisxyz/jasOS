@@ -350,4 +350,18 @@ ring 3 kills the thread. sh still has a ring-0 `crash` builtin command.
 
 Residual: envp is still one NULL. integrity still *starts* at 1. init/sh kernel-linked. No Se* bitmap. No DELETE right on unlink. virtio identify-only. mixed-VAD protect fail-closed. PIC not LAPIC. OOM unmap 16-page batch leak. host copyin is memcpy.
 
+| T23 | envp was a single NULL | stack had a terminator and no strings; syscall 6 has no 7th register |
+| T23 | `NtCreateProcess2` syscall 43 | `process_create_info` {argc, envc, argv, envp}; cap 16×128 |
+| T23 | crt0 `rdx` = envp | `lea rdx, [rsi + rdi*8 + 8]` after popping argc |
+
+---
+
+## T23 surface (0.19.0)
+
+- `NtCreateProcessEx` still takes argv/argc and forces envc=0. `NtCreateProcess2` takes a `process_create_info_t`. Caps `USER_ENVC_MAX=16`, `USER_ENV_LEN=128`. envc>0 with envp=NULL is `INVALID_PARAMETER`.
+- User stack, low VA: argc, argv[0..n-1], NULL, envp[0..m-1], NULL, then strings. envc=0 is two adjacent NULLs (T16 unchanged). crt0 pops argc into rdi, rsi=argv, rdx=envp.
+- Syscall 6 is unchanged (no 7th register). Syscall 43 a4 is the info block; argv/envp pointer arrays are `copyin`'d then each string `copyinstr`'d. SYS_MAX is 44.
+- init and sh pass `PATH=/bin:/usr/bin` and `HOME=/`. Spawn does **not** inherit the parent's envp automatically.
+- Residual: no auxv. No `getenv` in libc. env strings with no `=` are copied as-is. integrity still *starts* at 1. init/sh kernel-linked. mixed-VAD protect fail-closed.
+
 

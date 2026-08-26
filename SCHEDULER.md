@@ -177,4 +177,8 @@ pid 1's init thread then `NtDelayExecution` forever. `"init died"`
 still panics if pid 1's last thread exits. Host `--selftest` never
 creates init.
 
+T23: `builtin_entry` still only forwards argc/argv to `sh_main`.
+envp lives on the user stack for ET_EXEC; kernel-linked sh does not
+read `p->envv`. No ready-queue change.
+
 

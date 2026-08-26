@@ -234,4 +234,8 @@ T22: vnode data+vnode `kfree` runs in `vn_release` after VFS is
 dropped (HEAP=3, VFS=11). Open pins the vnode under VFS so a racing
 unlink cannot free a walker-held pointer. No new VADs.
 
+T23: env strings are written through `vmm_write_aspace` onto the
+existing user stack VAD. No extra mapping. Cap 16×128 plus argv
+fits in 128 KiB minus the guard page.
+
 

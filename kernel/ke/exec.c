@@ -61,10 +61,13 @@ static void elf_host_stub(void *arg)
 {
     (void)arg;
     process_t *p = ke_current_process();
-    kprintf("exec: ELF %s argc=%u", p ? p->image : "?", p ? p->argc : 0);
+    kprintf("exec: ELF %s argc=%u envc=%u", p ? p->image : "?",
+            p ? p->argc : 0, p ? p->envc : 0);
     if (p) {
         for (u32 i = 0; i < p->argc && i < USER_ARGC_MAX; i++)
             kprintf(" [%s]", p->argv[i]);
+        for (u32 i = 0; i < p->envc && i < USER_ENVC_MAX; i++)
+            kprintf(" {%s}", p->envv[i]);
     }
     kprintf(" entry=%llx vads=%u\n",
             (unsigned long long)(p ? p->user_entry : 0),
@@ -93,10 +96,30 @@ static status_t psp_copy_argv(process_t *p, const char *const *argv, u32 argc)
     return STATUS_SUCCESS;
 }
 
+/* T23: envp snapshot. envc=0 keeps the T16 single env NULL. */
+static status_t psp_copy_envp(process_t *p, const char *const *envp, u32 envc)
+{
+    if (!p) return STATUS_INVALID_PARAMETER;
+    if (envc > USER_ENVC_MAX) return STATUS_INVALID_PARAMETER;
+    if (envc && !envp) return STATUS_INVALID_PARAMETER;
+    p->envc = envc;
+    for (u32 i = 0; i < envc; i++) {
+        if (!envp[i])
+            p->envv[i][0] = 0;
+        else
+            strlcpy(p->envv[i], envp[i], USER_ENV_LEN);
+    }
+    return STATUS_SUCCESS;
+}
+
 /*
  * T16: argc/argv on the user stack. Strings first (high VA), then
  * env NULL, argv NULL, argv[n-1]..argv[0], argc (low VA). crt0 pops
  * argc into rdi and takes rsi = rsp as argv.
+ *
+ * T23: if envc>0, env strings sit with argv strings and env pointers
+ * sit between argv NULL and the env NULL terminator. crt0 loads
+ * envp into rdx as argv + argc + 1.
  *
  * Failure: a write miss means the stack VAD is gone; return 0.
  */
@@ -121,11 +144,28 @@ static virt_t psp_write_initial_stack(process_t *p)
             return 0;
         str_va[i] = sp;
     }
+    virt_t env_va[USER_ENVC_MAX];
+    u32 m = p->envc;
+    if (m > USER_ENVC_MAX) m = USER_ENVC_MAX;
+    for (u32 i = 0; i < m; i++) {
+        u64 len = 0;
+        while (p->envv[i][len]) len++;
+        len++;
+        sp -= (len + 7u) & ~7u;
+        if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, p->envv[i], len)))
+            return 0;
+        env_va[i] = sp;
+    }
     u64 z = 0;
     sp -= 8;
-    if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, &z, 8))) return 0;
+    if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, &z, 8))) return 0; /* env NULL */
+    for (u32 i = m; i-- > 0; ) {
+        sp -= 8;
+        if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, &env_va[i], 8)))
+            return 0;
+    }
     sp -= 8;
-    if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, &z, 8))) return 0;
+    if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, &z, 8))) return 0; /* argv NULL */
     for (u32 i = n; i-- > 0; ) {
         sp -= 8;
         if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, &str_va[i], 8)))
@@ -209,9 +249,32 @@ status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 
 status_t NtCreateProcessEx(handle_t *out, access_t access, const char *image, u32 flags,
                            const char *const *argv, u32 argc)
 {
+    process_create_info_t inf;
+    memset(&inf, 0, sizeof(inf));
+    inf.argc = argc;
+    inf.argv = argv;
+    inf.envc = 0;
+    inf.envp = NULL;
+    return NtCreateProcess2(out, access, image, flags, &inf);
+}
+
+status_t NtCreateProcess2(handle_t *out, access_t access, const char *image, u32 flags,
+                          const process_create_info_t *info)
+{
     if (!out || !image) return STATUS_INVALID_PARAMETER;
+    u32 argc = 0, envc = 0;
+    const char *const *argv = NULL;
+    const char *const *envp = NULL;
+    if (info) {
+        argc = info->argc;
+        envc = info->envc;
+        argv = info->argv;
+        envp = info->envp;
+    }
     if (argc > USER_ARGC_MAX) return STATUS_INVALID_PARAMETER;
     if (argc && !argv) return STATUS_INVALID_PARAMETER;
+    if (envc > USER_ENVC_MAX) return STATUS_INVALID_PARAMETER;
+    if (envc && !envp) return STATUS_INVALID_PARAMETER;
     process_t *parent = ke_current_process();
     if (!parent) parent = psp_system_process();
 
@@ -227,6 +290,12 @@ status_t NtCreateProcessEx(handle_t *out, access_t access, const char *image, u3
         return st;
     }
     st = psp_copy_argv(p, argv, argc);
+    if (!NT_SUCCESS(st)) {
+        kfree(bytes);
+        ob_dereference(&p->hdr);
+        return st;
+    }
+    st = psp_copy_envp(p, envp, envc);
     if (!NT_SUCCESS(st)) {
         kfree(bytes);
         ob_dereference(&p->hdr);
@@ -248,9 +317,9 @@ status_t NtCreateProcessEx(handle_t *out, access_t access, const char *image, u3
             ob_dereference(&p->hdr);
             return st;
         }
-        kprintf("exec: loaded ELF %s pid %llu entry=%llx argc=%u\n",
+        kprintf("exec: loaded ELF %s pid %llu entry=%llx argc=%u envc=%u\n",
                 image, (unsigned long long)p->pid,
-                (unsigned long long)p->user_entry, p->argc);
+                (unsigned long long)p->user_entry, p->argc, p->envc);
     } else if (!is_builtin && !(flags & CREATE_NO_IMAGE)) {
         kfree(bytes);
         ob_dereference(&p->hdr);

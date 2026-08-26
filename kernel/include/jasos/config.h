@@ -3,9 +3,9 @@
 #include <jasos/types.h>
 
 #define JASOS_VERSION_MAJOR  0
-#define JASOS_VERSION_MINOR  18
+#define JASOS_VERSION_MINOR  19
 #define JASOS_VERSION_PATCH  0
-#define JASOS_VERSION_STR    "0.18.0-aegis"
+#define JASOS_VERSION_STR    "0.19.0-aegis"
 
 
 #define PAGE_SHIFT           12u
@@ -85,6 +85,10 @@
 /* NtCreateProcess argv. A spray of 1 MiB strings fails closed here. */
 #define USER_ARGC_MAX        16u
 #define USER_ARG_LEN         128u
+/* T23: envp. Same cap as argv. Syscall 6 has no 7th arg; syscall 43
+ * takes a process_create_info block. */
+#define USER_ENVC_MAX        16u
+#define USER_ENV_LEN         USER_ARG_LEN
 
 /*
  * Lock ranking. Acquire only a STRICTLY HIGHER rank while holding one.

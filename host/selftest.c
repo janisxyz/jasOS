@@ -1285,6 +1285,99 @@ int selftest_run(void)
         NtClose(shh);
     }
 
+    /* T23: envp on the user stack. Syscall 6 still has no 7th arg;
+       NtCreateProcess2 / syscall 43 takes a process_create_info.
+       envc=0 keeps the T16 single env NULL after argv NULL. */
+    {
+        const char *av[] = { "/bin/echo", "hi" };
+        const char *ev[] = { "PATH=/bin", "HOME=/" };
+        process_create_info_t inf;
+        memset(&inf, 0, sizeof(inf));
+        inf.argc = 2;
+        inf.argv = av;
+        inf.envc = 2;
+        inf.envp = ev;
+
+        st = NtCreateProcess2(NULL, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED, &inf);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "p2 null out");
+        handle_t bad = 0;
+        process_create_info_t cap;
+        memset(&cap, 0, sizeof(cap));
+        cap.envc = USER_ENVC_MAX + 1;
+        cap.envp = ev;
+        st = NtCreateProcess2(&bad, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED, &cap);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "p2 envc cap");
+        memset(&cap, 0, sizeof(cap));
+        cap.envc = 2;
+        cap.envp = NULL;
+        st = NtCreateProcess2(&bad, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED, &cap);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "p2 envc without envp");
+
+        handle_t eh = 0;
+        st = NtCreateProcess2(&eh, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED, &inf);
+        EXPECT(NT_SUCCESS(st) && eh, "p2 echo process");
+        object_t *eo = NULL;
+        st = ht_lookup(&psp_system_process()->handles, eh, 0, OBJ_PROCESS, &eo);
+        EXPECT(NT_SUCCESS(st) && eo, "p2 echo lookup");
+        process_t *ep = (process_t *)eo;
+        EXPECT(ep->argc == 2, "p2 argc 2");
+        EXPECT(ep->envc == 2, "p2 envc 2");
+        EXPECT(strcmp(ep->envv[0], "PATH=/bin") == 0, "p2 PATH");
+        EXPECT(strcmp(ep->envv[1], "HOME=/") == 0, "p2 HOME");
+        EXPECT(ep->user_stack != 0, "p2 stack written");
+
+        /* low VA: argc, argv0, argv1, NULL, env0, env1, NULL */
+        u64 w[7];
+        memset(w, 0, sizeof(w));
+        st = vmm_read_aspace(&ep->aspace, w, ep->user_stack, sizeof(w));
+        EXPECT(NT_SUCCESS(st) && w[0] == 2, "p2 stack argc");
+        EXPECT(w[3] == 0, "p2 argv NULL");
+        EXPECT(w[6] == 0, "p2 env NULL");
+        char e0[16], e1[16];
+        memset(e0, 0, sizeof(e0));
+        memset(e1, 0, sizeof(e1));
+        EXPECT(NT_SUCCESS(vmm_read_aspace(&ep->aspace, e0, w[4], 10)) &&
+               strcmp(e0, "PATH=/bin") == 0, "p2 stack PATH");
+        EXPECT(NT_SUCCESS(vmm_read_aspace(&ep->aspace, e1, w[5], 7)) &&
+               strcmp(e1, "HOME=/") == 0, "p2 stack HOME");
+        ob_dereference(eo);
+        NtClose(eh);
+
+        /* envc=0 via Ex: env NULL sits immediately after argv NULL. */
+        handle_t e0h = 0;
+        st = NtCreateProcessEx(&e0h, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED,
+                               av, 2);
+        EXPECT(NT_SUCCESS(st) && e0h, "ex envc0 process");
+        object_t *e0o = NULL;
+        st = ht_lookup(&psp_system_process()->handles, e0h, 0, OBJ_PROCESS, &e0o);
+        EXPECT(NT_SUCCESS(st) && e0o, "ex envc0 lookup");
+        process_t *e0p = (process_t *)e0o;
+        EXPECT(e0p->envc == 0, "ex envc 0");
+        u64 z[5];
+        memset(z, 0, sizeof(z));
+        st = vmm_read_aspace(&e0p->aspace, z, e0p->user_stack, sizeof(z));
+        EXPECT(NT_SUCCESS(st) && z[0] == 2 && z[3] == 0 && z[4] == 0,
+               "ex env NULL after argv NULL");
+        ob_dereference(e0o);
+        NtClose(e0h);
+
+        /* Syscall 43 marshalling on the host (kernel pointers). */
+        handle_t dh = 0;
+        u64 info = 0;
+        st = syscall_dispatch(SYS_NtCreateProcess2, (u64)&dh, PROCESS_ALL_ACCESS,
+                              (u64)"/bin/echo", CREATE_SUSPENDED, (u64)&inf, 0, &info);
+        EXPECT(NT_SUCCESS(st) && dh, "syscall 43 dispatch");
+        object_t *dobj = NULL;
+        st = ht_lookup(&psp_system_process()->handles, dh, 0, OBJ_PROCESS, &dobj);
+        EXPECT(NT_SUCCESS(st) && dobj, "syscall 43 lookup");
+        EXPECT(((process_t *)dobj)->envc == 2, "syscall 43 envc");
+        ob_dereference(dobj);
+        NtClose(dh);
+
+        st = syscall_dispatch(SYS_MAX, 0, 0, 0, 0, 0, 0, &info);
+        EXPECT(st == STATUS_INVALID_SYSTEM_SERVICE, "SYS_MAX out of range");
+    }
+
     kprintf("selftest: all assertions passed\n");
     return 0;
 }

@@ -52,6 +52,34 @@ static status_t sys_opt_path(virt_t up, char *k, usize cap, const char **outp)
     return STATUS_SUCCESS;
 }
 
+/* Copy a user/kernel C-string vector into kernel storage. n=0 is a no-op. */
+static status_t sys_copy_strvec(virt_t uarray, u32 n, u32 nmax, usize cap,
+                                char storage[][USER_ARG_LEN], const char *ptrs[])
+{
+    if (n > nmax) return STATUS_INVALID_PARAMETER;
+    if (n && !uarray) return STATUS_INVALID_PARAMETER;
+    if (n == 0) return STATUS_SUCCESS;
+    virt_t ups[USER_ARGC_MAX];
+    if (n > USER_ARGC_MAX) return STATUS_INVALID_PARAMETER;
+    if (caller_user()) {
+        status_t st = copyin(ups, uarray, (u64)n * sizeof(virt_t));
+        if (!NT_SUCCESS(st)) return st;
+        for (u32 i = 0; i < n; i++) {
+            st = copyinstr(storage[i], ups[i], cap);
+            if (!NT_SUCCESS(st)) return st;
+            ptrs[i] = storage[i];
+        }
+    } else {
+        const char *const *av = (const char *const *)(uintptr_t)uarray;
+        for (u32 i = 0; i < n; i++) {
+            if (!av[i]) storage[i][0] = 0;
+            else strlcpy(storage[i], av[i], cap);
+            ptrs[i] = storage[i];
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
 static status_t sys_get_u64(virt_t up, u64 *out)
 {
     if (!up || !out) return STATUS_INVALID_PARAMETER;
@@ -886,6 +914,46 @@ status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5
         status_t st = sys_path((virt_t)a0, path, sizeof(path));
         if (!NT_SUCCESS(st)) return st;
         return NtDeleteFile(path);
+    }
+    case SYS_NtCreateProcess2: {
+        char path[PATH_MAX];
+        handle_t h = 0;
+        status_t st = sys_path((virt_t)a2, path, sizeof(path));
+        if (!NT_SUCCESS(st)) return st;
+        process_create_info_t inf;
+        memset(&inf, 0, sizeof(inf));
+        if (a4) {
+            if (caller_user()) {
+                st = copyin(&inf, (virt_t)a4, sizeof(inf));
+                if (!NT_SUCCESS(st)) return st;
+            } else {
+                inf = *(const process_create_info_t *)(uintptr_t)a4;
+            }
+        }
+        if (inf.argc > USER_ARGC_MAX || inf.envc > USER_ENVC_MAX)
+            return STATUS_INVALID_PARAMETER;
+        char kargv[USER_ARGC_MAX][USER_ARG_LEN];
+        char kenvp[USER_ENVC_MAX][USER_ENV_LEN];
+        const char *aptrs[USER_ARGC_MAX];
+        const char *eptrs[USER_ENVC_MAX];
+        st = sys_copy_strvec((virt_t)(uintptr_t)inf.argv, inf.argc, USER_ARGC_MAX,
+                             USER_ARG_LEN, kargv, aptrs);
+        if (!NT_SUCCESS(st)) return st;
+        st = sys_copy_strvec((virt_t)(uintptr_t)inf.envp, inf.envc, USER_ENVC_MAX,
+                             USER_ENV_LEN, kenvp, eptrs);
+        if (!NT_SUCCESS(st)) return st;
+        process_create_info_t kinf;
+        memset(&kinf, 0, sizeof(kinf));
+        kinf.argc = inf.argc;
+        kinf.envc = inf.envc;
+        kinf.argv = inf.argc ? aptrs : NULL;
+        kinf.envp = inf.envc ? eptrs : NULL;
+        st = NtCreateProcess2(&h, (access_t)a1, path, (u32)a3, &kinf);
+        if (NT_SUCCESS(st)) {
+            status_t st2 = sys_put_handle((virt_t)a0, h);
+            if (!NT_SUCCESS(st2)) { NtClose(h); return st2; }
+        }
+        return st;
     }
     default:                       return STATUS_INVALID_SYSTEM_SERVICE;
     }

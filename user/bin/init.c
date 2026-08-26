@@ -37,7 +37,14 @@ int init_main(int argc, char **argv)
     kprintf("init: launching sh\n");
     handle_t sh = 0;
     const char *av[] = { "/bin/sh" };
-    status_t st = NtCreateProcessEx(&sh, PROCESS_ALL_ACCESS, "/bin/sh", 0, av, 1);
+    const char *ev[] = { "PATH=/bin:/usr/bin", "HOME=/" };
+    process_create_info_t inf;
+    memset(&inf, 0, sizeof(inf));
+    inf.argc = 1;
+    inf.argv = av;
+    inf.envc = 2;
+    inf.envp = ev;
+    status_t st = NtCreateProcess2(&sh, PROCESS_ALL_ACCESS, "/bin/sh", 0, &inf);
     if (!NT_SUCCESS(st)) {
         kprintf("init: spawn sh failed %s\n", status_name(st));
         return 0;

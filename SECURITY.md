@@ -78,7 +78,7 @@ closed vs residual.
 | PIC not LAPIC | 8259 is v1; MADT/x2APIC is the next HAL | dmesg says 8259, never LAPIC |
 | Protect spans mixed VADs | one containing VAD only; coalesce is same-prot adjacent | fail closed `CONFLICTING_ADDRESSES` |
 | OOM unmap batch leak | >16-page free with kalloc fail batches 16; populate can refill a cleared page | fail closed is rare; commit cap keeps n_pages bounded |
-| NtCreateProcess has no envp | stack writes a single env NULL | no 7th syscall argument; T18 residual |
+| NtCreateProcess has no envp | T23: syscall 43 `process_create_info`; syscall 6 still argv-only |
 | No privileges bitmap | Token has pid+integrity only | `TOKEN_ADJUST` cannot grant Se*; there is no Se* |
 
 
@@ -104,5 +104,10 @@ undropped children. No Se* bitmap. envp is still one NULL.
 T22 residual: no DELETE access mask on the path walk (ramfs is
 world-unlinkable like world-creatable). No ACL. cwd may dangle at
 an unlinked dir. envp still one NULL. init/sh still kernel-linked.
+
+| envp was a terminator lie | T23: strings + pointers on the stack; syscall 43 |
+
+T23 residual: no auxv, no getenv, spawn does not inherit parent envp
+unless the caller builds the block. Syscall 6 still cannot pass envp.
 
 
