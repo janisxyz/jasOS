@@ -14,6 +14,15 @@ static directory_object_t *g_types_dir;
 
 static void nop_delete(object_t *o) { (void)o; }
 
+static void process_delete(object_t *o)
+{
+    process_t *p = (process_t *)o;
+    if (p->token) {
+        ob_dereference(&p->token->hdr);
+        p->token = NULL;
+    }
+}
+
 static void type_init(object_kind_t k, const char *name, usize body, bool waitable,
                       access_t gr, access_t gw, access_t ge, access_t ga, obj_delete_fn del)
 {
@@ -37,6 +46,7 @@ object_type_t *ob_type_device(void)    { return &g_types[OBJ_DEVICE]; }
 object_type_t *ob_type_event(void)     { return &g_types[OBJ_EVENT]; }
 object_type_t *ob_type_mutex(void)     { return &g_types[OBJ_MUTEX]; }
 object_type_t *ob_type_timer(void)     { return &g_types[OBJ_TIMER]; }
+object_type_t *ob_type_token(void)     { return &g_types[OBJ_TOKEN]; }
 
 const char *ob_kind_name(object_kind_t k)
 {
@@ -288,7 +298,7 @@ void ob_init(void)
     type_init(OBJ_DIRECTORY, "Directory", sizeof(directory_object_t) - sizeof(object_t), false,
               DIRECTORY_QUERY, DIRECTORY_CREATE_OBJECT, DIRECTORY_TRAVERSE, 0x1F, NULL);
     type_init(OBJ_PROCESS, "Process", sizeof(process_t) - sizeof(object_t), true,
-              PROCESS_QUERY_INFORMATION, PROCESS_VM_WRITE, PROCESS_CREATE_THREAD, PROCESS_ALL_ACCESS, NULL);
+              PROCESS_QUERY_INFORMATION, PROCESS_VM_WRITE, PROCESS_CREATE_THREAD, PROCESS_ALL_ACCESS, process_delete);
     type_init(OBJ_THREAD, "Thread", sizeof(thread_t) - sizeof(object_t), true,
               THREAD_QUERY_INFORMATION, THREAD_SUSPEND_RESUME, 0, THREAD_ALL_ACCESS, NULL);
     type_init(OBJ_SECTION, "Section", sizeof(section_object_t) - sizeof(object_t), false,
@@ -303,6 +313,8 @@ void ob_init(void)
               SYNCHRONIZE, MUTEX_MODIFY_STATE, 0, SYNCHRONIZE | MUTEX_MODIFY_STATE, NULL);
     type_init(OBJ_TIMER, "Timer", sizeof(timer_object_t) - sizeof(object_t), true,
               SYNCHRONIZE, TIMER_MODIFY_STATE, 0, SYNCHRONIZE | TIMER_MODIFY_STATE, NULL);
+    type_init(OBJ_TOKEN, "Token", sizeof(token_object_t) - sizeof(object_t), false,
+              TOKEN_QUERY, TOKEN_DUPLICATE, 0, TOKEN_ALL_ACCESS, NULL);
 
     /* Root is not allocated through ob_create (chicken/egg). */
     g_root = kalloc_zero(sizeof(*g_root));

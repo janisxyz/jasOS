@@ -3,9 +3,9 @@
 #include <jasos/types.h>
 
 #define JASOS_VERSION_MAJOR  0
-#define JASOS_VERSION_MINOR  15
+#define JASOS_VERSION_MINOR  16
 #define JASOS_VERSION_PATCH  0
-#define JASOS_VERSION_STR    "0.15.0-aegis"
+#define JASOS_VERSION_STR    "0.16.0-aegis"
 
 
 #define PAGE_SHIFT           12u
@@ -82,6 +82,10 @@
 /* Per-process committed user virtual. A mapping bomb fails here, not in PMM. */
 #define USER_COMMIT_MAX      (32u * 1024u * 1024u)
 
+/* NtCreateProcess argv. A spray of 1 MiB strings fails closed here. */
+#define USER_ARGC_MAX        16u
+#define USER_ARG_LEN         128u
+
 /*
  * Lock ranking. Acquire only a STRICTLY HIGHER rank while holding one.
  * Nested ranks are stacked on the PCB; unlock restores the previous.
@@ -128,6 +132,11 @@
 #define PROCESS_DUP_HANDLE       0x0040u
 #define PROCESS_QUERY_INFORMATION 0x0400u
 #define PROCESS_ALL_ACCESS       0x1FFFFFu
+
+#define TOKEN_QUERY              0x0008u
+#define TOKEN_DUPLICATE          0x0002u
+#define TOKEN_ADJUST             0x0020u
+#define TOKEN_ALL_ACCESS         0xF01FFu
 
 #define THREAD_TERMINATE         0x0001u
 #define THREAD_SUSPEND_RESUME    0x0002u

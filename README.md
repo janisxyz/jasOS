@@ -44,6 +44,11 @@ Clone it. `make`. `make run`. That is how you boot it.
   owned mutex, NOACCESS frame restore
 - 0.15: unmap/free never `pmm_free` under VMM; `vmm_ensure_leaf` for
   page tables; `/bin/echo` is ET_EXEC; `user_launch` writes argv[0]
+- 0.16: `NtCreateProcess` argv on the user stack (cap 16×128); Token
+  is `OBJ_TOKEN` with open/query/dup; drop-only integrity; System
+  pid 0 has a token
+
+
 
 
 

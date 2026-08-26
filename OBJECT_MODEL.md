@@ -197,5 +197,23 @@ object is still a Process; the image is an ELF section map like
 `/bin/hello`. sh's `echo` command remains a ring-0 builtin (standard
 shell). Token is still a Process field, not an object.
 
+T16: Process body gained `argc` / `argv[USER_ARGC_MAX][USER_ARG_LEN]`.
+That is the kernel copy. The user-visible argv lives on the user
+stack (see SYSCALL_ABI T16).
+
+T17: Token is `OBJ_TOKEN`, not a Process field. Process holds
+`token_object_t *`. Body: pid + integrity (0 user, 1 admin). Not
+waitable. Generic map: read=`TOKEN_QUERY`, write=`TOKEN_DUPLICATE`,
+all=`TOKEN_ALL_ACCESS`. `process_delete` derefs the token. System
+pid 0 also has one. `NtOpenProcessToken` inserts a handle in the
+*caller* table; `PROCESS_TERMINATE`-only cannot open. Duplicate
+creates a new object (snapshot), not a second handle to the same
+one.
+
+T18 start: `TOKEN_ADJUST` (0x20). `NtSetInformationToken` drops
+integrity. Raising is `ACCESS_DENIED`. No privileges bitmap.
+
+
+
 
 

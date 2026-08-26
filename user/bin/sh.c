@@ -231,7 +231,8 @@ int sh_main(int argc, char **argv)
                         strlcat(path, av[0], PATH_MAX);
                     }
                     handle_t ph = 0;
-                    status_t st = NtCreateProcess(&ph, PROCESS_ALL_ACCESS, path, 0);
+                    status_t st = NtCreateProcessEx(&ph, PROCESS_ALL_ACCESS, path, 0,
+                                                    (const char *const *)av, (u32)ac);
                     if (!NT_SUCCESS(st))
                         kprintf("sh: %s: %s\n", av[0], status_name(st));
                     else {

@@ -886,6 +886,8 @@ int selftest_run(void)
         process_t *ep = (process_t *)eo;
         EXPECT(ep->user_mode, "echo is user_mode");
         EXPECT(ep->aspace.vad_count >= 1, "echo has image VAD");
+        EXPECT(ep->argc == 1, "echo default argc 1");
+        EXPECT(strcmp(ep->argv[0], "/bin/echo") == 0, "echo default argv0");
         ob_dereference(eo);
         NtClose(eh);
     }
@@ -921,6 +923,167 @@ int selftest_run(void)
         EXPECT(NT_SUCCESS(st), "t15 size-0 release");
         ob_dereference(o);
         NtClose(ph);
+    }
+
+    /* T16: NtCreateProcessEx copies argv onto the user stack. */
+    {
+        const char *av[] = { "/bin/echo", "hello", "from", "argv" };
+        st = NtCreateProcessEx(NULL, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED,
+                               av, 4);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "ex null out");
+        handle_t bad = 0;
+        st = NtCreateProcessEx(&bad, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED,
+                               av, USER_ARGC_MAX + 1);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "ex argc cap");
+        st = NtCreateProcessEx(&bad, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED,
+                               NULL, 3);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "ex argc without argv");
+
+        handle_t eh = 0;
+        st = NtCreateProcessEx(&eh, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED,
+                               av, 4);
+        EXPECT(NT_SUCCESS(st) && eh, "ex echo process");
+        object_t *eo = NULL;
+        st = ht_lookup(&psp_system_process()->handles, eh, 0, OBJ_PROCESS, &eo);
+        EXPECT(NT_SUCCESS(st) && eo, "ex echo lookup");
+        process_t *ep = (process_t *)eo;
+        EXPECT(ep->argc == 4, "ex argc 4");
+        EXPECT(strcmp(ep->argv[0], "/bin/echo") == 0, "ex argv0");
+        EXPECT(strcmp(ep->argv[1], "hello") == 0, "ex argv1");
+        EXPECT(strcmp(ep->argv[2], "from") == 0, "ex argv2");
+        EXPECT(strcmp(ep->argv[3], "argv") == 0, "ex argv3");
+        EXPECT(ep->user_stack != 0, "ex stack written");
+
+        u64 argc64 = 0;
+        st = vmm_read_aspace(&ep->aspace, &argc64, ep->user_stack, 8);
+        EXPECT(NT_SUCCESS(st) && argc64 == 4, "ex stack argc");
+        u64 ap[5];
+        st = vmm_read_aspace(&ep->aspace, ap, ep->user_stack + 8, sizeof(ap));
+        EXPECT(NT_SUCCESS(st), "ex stack argv vector");
+        EXPECT(ap[4] == 0, "ex argv NULL terminator");
+        char s0[16], s1[16], s2[16], s3[16];
+        memset(s0, 0, sizeof(s0));
+        memset(s1, 0, sizeof(s1));
+        memset(s2, 0, sizeof(s2));
+        memset(s3, 0, sizeof(s3));
+        EXPECT(NT_SUCCESS(vmm_read_aspace(&ep->aspace, s0, ap[0], 11)) &&
+               strcmp(s0, "/bin/echo") == 0, "ex stack argv0 string");
+        EXPECT(NT_SUCCESS(vmm_read_aspace(&ep->aspace, s1, ap[1], 6)) &&
+               strcmp(s1, "hello") == 0, "ex stack argv1 string");
+        EXPECT(NT_SUCCESS(vmm_read_aspace(&ep->aspace, s2, ap[2], 5)) &&
+               strcmp(s2, "from") == 0, "ex stack argv2 string");
+        EXPECT(NT_SUCCESS(vmm_read_aspace(&ep->aspace, s3, ap[3], 5)) &&
+               strcmp(s3, "argv") == 0, "ex stack argv3 string");
+
+        ob_dereference(eo);
+        NtClose(eh);
+    }
+
+    /* T17: Token is an object. Open requires PROCESS_QUERY_INFORMATION.
+       TOKEN_QUERY is required to read it. TOKEN_DUPLICATE copies the
+       snapshot so a closed process handle does not kill the token. */
+    {
+        handle_t ph = 0;
+        st = NtCreateProcess(&ph, PROCESS_ALL_ACCESS, "/bin/hello", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st), "token proc");
+        object_t *o = NULL;
+        st = ht_lookup(&psp_system_process()->handles, ph, 0, OBJ_PROCESS, &o);
+        EXPECT(NT_SUCCESS(st) && o, "token proc lookup");
+        process_t *pp = (process_t *)o;
+        EXPECT(pp->token != NULL, "process has token");
+        EXPECT(pp->token->hdr.type && pp->token->hdr.type->kind == OBJ_TOKEN,
+               "token kind");
+        EXPECT(pp->token->pid == pp->pid, "token pid");
+        EXPECT(pp->token->integrity == 1, "token admin until logon");
+        kpid_t tok_pid = pp->pid;
+        ob_dereference(o);
+
+        handle_t th = 0;
+        st = NtOpenProcessToken(ph, 0, &th);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "open token access 0");
+        st = NtOpenProcessToken(ph, TOKEN_QUERY, NULL);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "open token null out");
+        st = NtOpenProcessToken(ph, TOKEN_QUERY, &th);
+        EXPECT(NT_SUCCESS(st) && th, "open token");
+
+        token_basic_information_t inf;
+        memset(&inf, 0, sizeof(inf));
+        st = NtQueryInformationToken(th, &inf, sizeof(inf));
+        EXPECT(NT_SUCCESS(st), "query token");
+        EXPECT(inf.pid == tok_pid, "query token pid");
+        EXPECT(inf.integrity == 1, "query token admin until logon");
+        st = NtQueryInformationToken(th, &inf, 1);
+        EXPECT(st == STATUS_INFO_LENGTH_MISMATCH, "query token short buf");
+
+        object_basic_information_t obi;
+        memset(&obi, 0, sizeof(obi));
+        st = NtQueryObject(th, &obi, sizeof(obi));
+        EXPECT(NT_SUCCESS(st) && obi.kind == OBJ_TOKEN, "query object token kind");
+
+        handle_t th_dup_only = 0;
+        st = NtOpenProcessToken(ph, TOKEN_DUPLICATE, &th_dup_only);
+        EXPECT(NT_SUCCESS(st) && th_dup_only, "open token dup only");
+        st = NtQueryInformationToken(th_dup_only, &inf, sizeof(inf));
+        EXPECT(st == STATUS_ACCESS_DENIED, "dup-only cannot query");
+
+        handle_t th_copy = 0;
+        st = NtDuplicateToken(th, TOKEN_QUERY, &th_copy);
+        EXPECT(st == STATUS_ACCESS_DENIED, "query-only cannot duplicate");
+        st = NtDuplicateToken(th_dup_only, TOKEN_QUERY, &th_copy);
+        EXPECT(NT_SUCCESS(st) && th_copy, "duplicate token");
+        memset(&inf, 0, sizeof(inf));
+        st = NtQueryInformationToken(th_copy, &inf, sizeof(inf));
+        EXPECT(NT_SUCCESS(st) && inf.pid == tok_pid && inf.integrity == 1,
+               "duplicate token query");
+
+        handle_t ph_term = 0;
+        st = NtCreateProcess(&ph_term, PROCESS_TERMINATE, "/bin/hello", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st), "term-only proc");
+        handle_t th_denied = 0;
+        st = NtOpenProcessToken(ph_term, TOKEN_QUERY, &th_denied);
+        EXPECT(st == STATUS_ACCESS_DENIED, "terminate-only cannot open token");
+
+        handle_t selftok = 0;
+        st = NtOpenProcessToken(HANDLE_CURRENT, TOKEN_QUERY, &selftok);
+        EXPECT(NT_SUCCESS(st) && selftok, "open current token");
+        memset(&inf, 0, sizeof(inf));
+        st = NtQueryInformationToken(selftok, &inf, sizeof(inf));
+        EXPECT(NT_SUCCESS(st) && inf.pid == 0 && inf.integrity == 1,
+               "system token pid 0 admin");
+
+        st = NtWaitForSingleObject(th, 0);
+        EXPECT(st == STATUS_INVALID_PARAMETER || st == STATUS_ACCESS_DENIED,
+               "token is not waitable");
+
+        /* T18 start: drop-only integrity. Cannot raise. */
+        handle_t th_adj = 0;
+        st = NtOpenProcessToken(ph, TOKEN_ADJUST | TOKEN_QUERY, &th_adj);
+        EXPECT(NT_SUCCESS(st) && th_adj, "open token adjust");
+        st = NtSetInformationToken(th, 0);
+        EXPECT(st == STATUS_ACCESS_DENIED, "query-only cannot adjust");
+        st = NtSetInformationToken(th_adj, 2);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "integrity > 1 refused");
+        st = NtSetInformationToken(th_adj, 0);
+        EXPECT(NT_SUCCESS(st), "drop integrity to user");
+        memset(&inf, 0, sizeof(inf));
+        st = NtQueryInformationToken(th_adj, &inf, sizeof(inf));
+        EXPECT(NT_SUCCESS(st) && inf.integrity == 0, "query dropped integrity");
+        st = NtSetInformationToken(th_adj, 1);
+        EXPECT(st == STATUS_ACCESS_DENIED, "cannot raise integrity");
+        memset(&inf, 0, sizeof(inf));
+        st = NtQueryInformationToken(th, &inf, sizeof(inf));
+        EXPECT(NT_SUCCESS(st) && inf.integrity == 0, "same token object dropped");
+        memset(&inf, 0, sizeof(inf));
+        st = NtQueryInformationToken(th_copy, &inf, sizeof(inf));
+        EXPECT(NT_SUCCESS(st) && inf.integrity == 1, "duplicate token independent");
+
+        NtClose(th);
+        NtClose(th_dup_only);
+        NtClose(th_copy);
+        NtClose(th_adj);
+        NtClose(selftok);
+        NtClose(ph);
+        NtClose(ph_term);
     }
 
     kprintf("selftest: all assertions passed\n");

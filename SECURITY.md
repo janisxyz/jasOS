@@ -57,6 +57,10 @@ closed vs residual.
 | Unmap `pmm_free` under VMM | collect PAs, drop VMM, then `pmm_free` (T15) |
 | `vmm_map` `pt_alloc` under VMM | `vmm_ensure_leaf` allocates the table first |
 | `/bin/echo` kernel-linked | unlinked; ET_EXEC + ntdll; sh builtin echo remains ring 0 |
+| NtCreateProcess argv missing | T16: a4/a5 copyin + stack image; cap 16×128 |
+| Token was a Process field | T17: `OBJ_TOKEN`; open needs `PROCESS_QUERY_INFORMATION`; query needs `TOKEN_QUERY` |
+| TOKEN_DUPLICATE was a dead bit | T17: `NtDuplicateToken` copies pid+integrity into a new object |
+| Integrity could be raised | T18: `NtSetInformationToken` drop-only |
 
 ## Residual (honest)
 
@@ -68,13 +72,14 @@ closed vs residual.
 | VAD array 64 | a mapping bomb fails closed with `INSUFFICIENT_RESOURCES` | fail closed is the mitigation; commit cap is the other |
 | Recursive PML4 | if a user map ever got slot 510, they own page tables | user `NtMap` rejects high VA; user half of CR3 is private; slot is NX |
 | Host `copyin` is memcpy | host HAL is not a security boundary | hardware path probes VADs and copies via HHDM |
-| Admin == kernel | Token is a field, not an object | do not claim otherwise |
+| Admin == kernel | Token is an object; integrity still starts at 1 | do not claim logon exists; drop is 1→0 only |
 | HHDM maps RAM RW | heap and copyin live there | kernel `.text` is RO in HHDM; user never has HHDM |
 | virtio-blk virtqueues | identify-only; I/O is Ramdisk0 | do not print "virtio I/O up" |
 | PIC not LAPIC | 8259 is v1; MADT/x2APIC is the next HAL | dmesg says 8259, never LAPIC |
 | Protect spans mixed VADs | one containing VAD only; coalesce is same-prot adjacent | fail closed `CONFLICTING_ADDRESSES` |
 | OOM unmap batch leak | >16-page free with kalloc fail batches 16; populate can refill a cleared page | fail closed is rare; commit cap keeps n_pages bounded |
-| NtCreateProcess has no argv | `user_launch` writes argc=1 / argv[0]=image only | extra operands are T16 |
+| NtCreateProcess has no envp | stack writes a single env NULL | no 7th syscall argument; T18 residual |
+| No privileges bitmap | Token has pid+integrity only | `TOKEN_ADJUST` cannot grant Se*; there is no Se* |
 
 
 ## Panic path contract

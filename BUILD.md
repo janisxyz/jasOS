@@ -108,6 +108,14 @@ on a mutex the caller already owns.
 0.15 selftest also covers `/bin/echo` as ELF (not a kernel builtin),
 32-page populated free + hole realloc, and size-0 release after that.
 
+0.16 selftest also covers `NtCreateProcessEx` argv cap/null/stack
+round-trip (`/bin/echo hello from argv`), Token as `OBJ_TOKEN`,
+`NtOpenProcessToken` rights (`PROCESS_QUERY_INFORMATION`,
+`TOKEN_QUERY` vs `TOKEN_DUPLICATE`), `NtDuplicateToken` independence,
+drop-only `NtSetInformationToken`, and System pid 0 token.
+
+
+
 
 ```
 ./build/jasos-host

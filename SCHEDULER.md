@@ -153,6 +153,17 @@ Destroy snapshots VADs, unmaps rank-safe (no PMM under VMM), then
 frees user page tables. `user_launch` (hardware) writes argc/argv[0]
 before `enter_user`; extra operands are T16.
 
+T16: `builtin_entry` and `elf_host_stub` consume `p->argc`/`p->argv`.
+Hardware `user_launch` still `enter_user(entry, user_stack)` — the
+stack pointer is the argc slot. No scheduler change.
+
+T17: `psp_create_process` fails closed if `ob_create(OBJ_TOKEN)`
+returns NULL (destroys aspace first). System process also attaches
+a token. `sched_ready` is unchanged (already idempotent on
+READY/RUNNING).
+
+
+
 
 
 

@@ -50,10 +50,19 @@ static void builtin_entry(void *arg)
 {
     int (*mainfn)(int, char **) = (int (*)(int, char **))arg;
     process_t *p = ke_current_process();
-    char *av[2];
-    av[0] = p ? p->image : "unknown";
-    av[1] = NULL;
-    int rc = mainfn ? mainfn(1, av) : 1;
+    char *av[USER_ARGC_MAX + 1];
+    u32 n = p ? p->argc : 0;
+    if (n > USER_ARGC_MAX) n = USER_ARGC_MAX;
+    if (n == 0) {
+        av[0] = p ? p->image : "unknown";
+        av[1] = NULL;
+        n = 1;
+    } else {
+        for (u32 i = 0; i < n; i++)
+            av[i] = p->argv[i];
+        av[n] = NULL;
+    }
+    int rc = mainfn ? mainfn((int)n, av) : 1;
     NtTerminateProcess(HANDLE_CURRENT, rc == 0 ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL);
 }
 
@@ -62,51 +71,93 @@ static void elf_host_stub(void *arg)
 {
     (void)arg;
     process_t *p = ke_current_process();
-    kprintf("exec: ELF %s loaded host-side (no ring 3) entry=%llx vads=%u\n",
-            p ? p->image : "?",
+    kprintf("exec: ELF %s argc=%u", p ? p->image : "?", p ? p->argc : 0);
+    if (p) {
+        for (u32 i = 0; i < p->argc && i < USER_ARGC_MAX; i++)
+            kprintf(" [%s]", p->argv[i]);
+    }
+    kprintf(" entry=%llx vads=%u\n",
             (unsigned long long)(p ? p->user_entry : 0),
             p ? p->aspace.vad_count : 0);
     NtTerminateProcess(HANDLE_CURRENT, STATUS_SUCCESS);
 }
 #endif
 
-#ifndef JASOS_HOST
+static status_t psp_copy_argv(process_t *p, const char *const *argv, u32 argc)
+{
+    if (!p) return STATUS_INVALID_PARAMETER;
+    if (argc > USER_ARGC_MAX) return STATUS_INVALID_PARAMETER;
+    if (argc && !argv) return STATUS_INVALID_PARAMETER;
+    if (argc == 0) {
+        p->argc = 1;
+        strlcpy(p->argv[0], p->image[0] ? p->image : "unknown", USER_ARG_LEN);
+        return STATUS_SUCCESS;
+    }
+    p->argc = argc;
+    for (u32 i = 0; i < argc; i++) {
+        if (!argv[i])
+            p->argv[i][0] = 0;
+        else
+            strlcpy(p->argv[i], argv[i], USER_ARG_LEN);
+    }
+    return STATUS_SUCCESS;
+}
+
 /*
- * T16 start: write the initial user stack. Today argc=1, argv[0]=image.
- * Extra operands need a syscall argv vector — NtCreateProcess has none.
+ * T16: argc/argv on the user stack. Strings first (high VA), then
+ * env NULL, argv NULL, argv[n-1]..argv[0], argc (low VA). crt0 pops
+ * argc into rdi and takes rsi = rsp as argv.
+ *
+ * Failure: a write miss means the stack VAD is gone; return 0.
  */
 static virt_t psp_write_initial_stack(process_t *p)
 {
-    virt_t sp = p->user_stack;
-    u64 nlen = 0;
-    while (p->image[nlen]) nlen++;
-    nlen++;
-    sp -= (nlen + 15u) & ~15u;
-    vmm_write_aspace(&p->aspace, sp, p->image, nlen);
-    virt_t arg0 = sp;
+    if (!p || !p->user_mode) return 0;
+    u32 n = p->argc;
+    if (n == 0) {
+        p->argc = 1;
+        strlcpy(p->argv[0], p->image, USER_ARG_LEN);
+        n = 1;
+    }
+    if (n > USER_ARGC_MAX) n = USER_ARGC_MAX;
+    virt_t sp = USER_STACK_TOP - 16;
+    virt_t str_va[USER_ARGC_MAX];
+    for (u32 i = 0; i < n; i++) {
+        u64 len = 0;
+        while (p->argv[i][len]) len++;
+        len++;
+        sp -= (len + 7u) & ~7u;
+        if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, p->argv[i], len)))
+            return 0;
+        str_va[i] = sp;
+    }
     u64 z = 0;
-    u64 argc = 1;
     sp -= 8;
-    vmm_write_aspace(&p->aspace, sp, &z, 8);
+    if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, &z, 8))) return 0;
     sp -= 8;
-    vmm_write_aspace(&p->aspace, sp, &z, 8);
+    if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, &z, 8))) return 0;
+    for (u32 i = n; i-- > 0; ) {
+        sp -= 8;
+        if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, &str_va[i], 8)))
+            return 0;
+    }
+    u64 argc64 = n;
     sp -= 8;
-    vmm_write_aspace(&p->aspace, sp, &arg0, 8);
-    sp -= 8;
-    vmm_write_aspace(&p->aspace, sp, &argc, 8);
+    if (!NT_SUCCESS(vmm_write_aspace(&p->aspace, sp, &argc64, 8))) return 0;
+    p->user_stack = sp;
     return sp;
 }
 
+#ifndef JASOS_HOST
 static void user_launch(void *arg)
 {
     (void)arg;
     process_t *p = ke_current_process();
-    if (!p || !p->user_entry) {
+    if (!p || !p->user_entry || !p->user_stack) {
         NtTerminateProcess(HANDLE_CURRENT, STATUS_INVALID_IMAGE_FORMAT);
         return;
     }
-    virt_t sp = psp_write_initial_stack(p);
-    enter_user(p->user_entry, sp, 0x202);
+    enter_user(p->user_entry, p->user_stack, 0x202);
 }
 
 void user_thread_entry(void *arg)
@@ -134,8 +185,9 @@ status_t psp_exec_image(process_t *p, const u8 *image, u64 len, virt_t *entry_ou
     st = vmm_alloc_user(p, &stack_base, USER_STACK_SIZE - PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
     if (!NT_SUCCESS(st)) return st;
     p->user_entry = entry;
-    p->user_stack = USER_STACK_TOP - 16;
     p->user_mode = true;
+    if (!psp_write_initial_stack(p))
+        return STATUS_NO_MEMORY;
     if (entry_out) *entry_out = entry;
     return STATUS_SUCCESS;
 }
@@ -161,7 +213,15 @@ static status_t seed_stdio(process_t *p)
 
 status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 flags)
 {
+    return NtCreateProcessEx(out, access, image, flags, NULL, 0);
+}
+
+status_t NtCreateProcessEx(handle_t *out, access_t access, const char *image, u32 flags,
+                           const char *const *argv, u32 argc)
+{
     if (!out || !image) return STATUS_INVALID_PARAMETER;
+    if (argc > USER_ARGC_MAX) return STATUS_INVALID_PARAMETER;
+    if (argc && !argv) return STATUS_INVALID_PARAMETER;
     process_t *parent = ke_current_process();
     if (!parent) parent = psp_system_process();
 
@@ -174,6 +234,12 @@ status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 
     st = psp_create_process(image, parent, &p);
     if (!NT_SUCCESS(st)) {
         kfree(bytes);
+        return st;
+    }
+    st = psp_copy_argv(p, argv, argc);
+    if (!NT_SUCCESS(st)) {
+        kfree(bytes);
+        ob_dereference(&p->hdr);
         return st;
     }
     seed_stdio(p);
@@ -192,9 +258,9 @@ status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 
             ob_dereference(&p->hdr);
             return st;
         }
-        kprintf("exec: loaded ELF %s pid %llu entry=%llx\n",
+        kprintf("exec: loaded ELF %s pid %llu entry=%llx argc=%u\n",
                 image, (unsigned long long)p->pid,
-                (unsigned long long)p->user_entry);
+                (unsigned long long)p->user_entry, p->argc);
     } else if (!is_builtin && !(flags & CREATE_NO_IMAGE)) {
         kfree(bytes);
         ob_dereference(&p->hdr);

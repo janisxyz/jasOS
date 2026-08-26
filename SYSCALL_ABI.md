@@ -188,6 +188,27 @@ dropping VMM. `/bin/echo` is ET_EXEC; `NtCreateProcess("/bin/echo")` is
 the ring-3 path. `user_launch` writes `argc=1`, `argv[0]=image`. Extra
 operands are T16 — the syscall still has no argv vector.
 
+T16: syscall 6 `NtCreateProcess` a4 is a user array of C-string
+pointers, a5 is argc. argc=0 keeps the T15 argv[0]=image path.
+argc>`USER_ARGC_MAX` or argc>0 with a4=0 is `INVALID_PARAMETER`.
+Each string is `copyinstr`'d into a kernel cap of `USER_ARG_LEN`.
+`NtCreateProcessEx` is the kernel/host entry; the 4-arg wrapper
+passes NULL/0.
+
+T17: syscall 38 `NtOpenProcessToken` a0 process (`-1` self) a1 access
+a2 out handle. Foreign process requires `PROCESS_QUERY_INFORMATION`.
+access=0 is `INVALID_PARAMETER`. No token on the process is
+`STATUS_NO_TOKEN` (`0xC000007C`).
+syscall 39 `NtQueryInformationToken` a0 token a1 buf a2 len. Needs
+`TOKEN_QUERY`. Buffer is `token_basic_information_t` { pid, integrity }.
+syscall 40 `NtDuplicateToken` a0 src a1 access a2 out. Needs
+`TOKEN_DUPLICATE`. New object, independent lifetime.
+
+T18 start: syscall 41 `NtSetInformationToken` a0 token a1 integrity
+(0 or 1). Needs `TOKEN_ADJUST`. Drop only; raise is `ACCESS_DENIED`.
+
+
+
 
 
 

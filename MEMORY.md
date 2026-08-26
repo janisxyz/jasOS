@@ -209,6 +209,18 @@ Residual: OOM on a >16-page free falls back to 16-page batches;
 a populate of an already-cleared page in that window leaks one frame.
 `walk_alloc(create=true)` remains for `vmm_init` only (no VMM lock).
 
+T16: user stack image is written through `vmm_write_aspace` after the
+stack VAD is committed. Strings sit below `USER_STACK_TOP-16`, then
+env NULL, argv NULL, argv pointers, argc. The page at
+`USER_STACK_TOP - USER_STACK_SIZE` is still not a VAD (T11 guard).
+A write miss returns 0 and `psp_exec_image` fails `NO_MEMORY`.
+
+T17: Token objects are heap-backed (`ob_create`). Process create that
+cannot allocate a token destroys the aspace (hardware CR3) before
+deref. No new VADs.
+
+
+
 
 
 

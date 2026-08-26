@@ -42,7 +42,11 @@
 #define SYS_NtCancelTimer              35
 #define SYS_NtWaitForMultipleObjects   36
 #define SYS_NtProtectVirtualMemory     37
-#define SYS_MAX                        38
+#define SYS_NtOpenProcessToken         38
+#define SYS_NtQueryInformationToken    39
+#define SYS_NtDuplicateToken           40
+#define SYS_NtSetInformationToken      41
+#define SYS_MAX                        42
 
 status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 *info);
 
@@ -70,6 +74,8 @@ status_t NtAllocateVirtualMemory(handle_t proc, virt_t *base, u64 size, u32 prot
 status_t NtCreatePipe(handle_t *read_out, handle_t *write_out);
 status_t NtQueryInformationProcess(handle_t h, void *buf, u64 n);
 status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 flags);
+status_t NtCreateProcessEx(handle_t *out, access_t access, const char *image, u32 flags,
+                           const char *const *argv, u32 argc);
 status_t NtTerminateThread(handle_t h, status_t st);
 status_t NtDuplicateObject(handle_t src_proc, handle_t src, handle_t dst_proc, handle_t *out, access_t access, u32 flags);
 status_t NtQueryObject(handle_t h, void *buf, u64 n);
@@ -85,6 +91,10 @@ status_t NtCancelTimer(handle_t h);
 status_t NtWaitForMultipleObjects(handle_t *hs, u32 count, bool wait_all, u64 timeout_ticks);
 status_t NtQueryVirtualMemory(handle_t proc, virt_t addr, void *buf, u64 n);
 status_t NtProtectVirtualMemory(handle_t proc, virt_t base, u64 size, u32 prot, u32 *old_prot);
+status_t NtOpenProcessToken(handle_t proc, access_t access, handle_t *out);
+status_t NtQueryInformationToken(handle_t h, void *buf, u64 n);
+status_t NtDuplicateToken(handle_t src, access_t access, handle_t *out);
+status_t NtSetInformationToken(handle_t h, u32 integrity);
 
 typedef struct sys_process_info {
     kpid_t pid;
@@ -116,3 +126,9 @@ typedef struct memory_basic_information {
     u32    type;
     u32    state;
 } memory_basic_information_t;
+
+/* T17: Token query. integrity 1 = admin until logon exists. */
+typedef struct token_basic_information {
+    kpid_t pid;
+    u32    integrity;
+} token_basic_information_t;

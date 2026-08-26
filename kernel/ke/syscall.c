@@ -442,6 +442,85 @@ status_t NtQueryVirtualMemory(handle_t proc, virt_t addr, void *buf, u64 n)
     return STATUS_SUCCESS;
 }
 
+status_t NtOpenProcessToken(handle_t proc, access_t access, handle_t *out)
+{
+    if (!out || access == 0) return STATUS_INVALID_PARAMETER;
+    process_t *p;
+    object_t *held = NULL;
+    if (proc == HANDLE_CURRENT) {
+        p = ke_current_process();
+    } else {
+        status_t st = ht_lookup(cur_ht(), proc, PROCESS_QUERY_INFORMATION, OBJ_PROCESS, &held);
+        if (!NT_SUCCESS(st)) return st;
+        p = (process_t *)held;
+    }
+    if (!p) {
+        if (held) ob_dereference(held);
+        return STATUS_INVALID_HANDLE;
+    }
+    if (!p->token) {
+        if (held) ob_dereference(held);
+        return STATUS_NO_TOKEN;
+    }
+    status_t st = ht_insert(cur_ht(), &p->token->hdr, access, out);
+    if (held) ob_dereference(held);
+    return st;
+}
+
+status_t NtQueryInformationToken(handle_t h, void *buf, u64 n)
+{
+    if (!buf || n < sizeof(token_basic_information_t))
+        return STATUS_INFO_LENGTH_MISMATCH;
+    object_t *o;
+    status_t st = ht_lookup(cur_ht(), h, TOKEN_QUERY, OBJ_TOKEN, &o);
+    if (!NT_SUCCESS(st)) return st;
+    token_object_t *t = (token_object_t *)o;
+    token_basic_information_t *inf = buf;
+    inf->pid = t->pid;
+    inf->integrity = t->integrity;
+    ob_dereference(o);
+    return STATUS_SUCCESS;
+}
+
+status_t NtDuplicateToken(handle_t src, access_t access, handle_t *out)
+{
+    if (!out || access == 0) return STATUS_INVALID_PARAMETER;
+    object_t *o;
+    status_t st = ht_lookup(cur_ht(), src, TOKEN_DUPLICATE, OBJ_TOKEN, &o);
+    if (!NT_SUCCESS(st)) return st;
+    token_object_t *src_tok = (token_object_t *)o;
+    object_t *copy = ob_create(ob_type_token(), NULL, NULL);
+    if (!copy) {
+        ob_dereference(o);
+        return STATUS_NO_MEMORY;
+    }
+    token_object_t *dst = (token_object_t *)copy;
+    dst->pid = src_tok->pid;
+    dst->integrity = src_tok->integrity;
+    st = ht_insert(cur_ht(), copy, access, out);
+    ob_dereference(copy);
+    ob_dereference(o);
+    return st;
+}
+
+/* T18 start: drop-only integrity. A token may go 1→0. Raising is
+   ACCESS_DENIED. No privileges bitmap — do not claim Se* exists. */
+status_t NtSetInformationToken(handle_t h, u32 integrity)
+{
+    if (integrity > 1) return STATUS_INVALID_PARAMETER;
+    object_t *o;
+    status_t st = ht_lookup(cur_ht(), h, TOKEN_ADJUST, OBJ_TOKEN, &o);
+    if (!NT_SUCCESS(st)) return st;
+    token_object_t *t = (token_object_t *)o;
+    if (integrity > t->integrity) {
+        ob_dereference(o);
+        return STATUS_ACCESS_DENIED;
+    }
+    t->integrity = integrity;
+    ob_dereference(o);
+    return STATUS_SUCCESS;
+}
+
 status_t syscall_from_entry(u64 *frame)
 {
     /* nr, a0, a1, a2, a3, a4, a5 */
@@ -542,7 +621,33 @@ status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5
         handle_t h = 0;
         status_t st = sys_path((virt_t)a2, path, sizeof(path));
         if (!NT_SUCCESS(st)) return st;
-        st = NtCreateProcess(&h, (access_t)a1, path, (u32)a3);
+        u32 argc = (u32)a5;
+        if (argc > USER_ARGC_MAX) return STATUS_INVALID_PARAMETER;
+        if (argc && !a4) return STATUS_INVALID_PARAMETER;
+        if (argc == 0) {
+            st = NtCreateProcess(&h, (access_t)a1, path, (u32)a3);
+        } else {
+            char kargv[USER_ARGC_MAX][USER_ARG_LEN];
+            const char *ptrs[USER_ARGC_MAX];
+            virt_t ups[USER_ARGC_MAX];
+            if (caller_user()) {
+                st = copyin(ups, (virt_t)a4, (u64)argc * sizeof(virt_t));
+                if (!NT_SUCCESS(st)) return st;
+                for (u32 i = 0; i < argc; i++) {
+                    st = copyinstr(kargv[i], ups[i], USER_ARG_LEN);
+                    if (!NT_SUCCESS(st)) return st;
+                    ptrs[i] = kargv[i];
+                }
+            } else {
+                const char *const *av = (const char *const *)(uintptr_t)a4;
+                for (u32 i = 0; i < argc; i++) {
+                    if (!av[i]) kargv[i][0] = 0;
+                    else strlcpy(kargv[i], av[i], USER_ARG_LEN);
+                    ptrs[i] = kargv[i];
+                }
+            }
+            st = NtCreateProcessEx(&h, (access_t)a1, path, (u32)a3, ptrs, argc);
+        }
         if (NT_SUCCESS(st)) {
             status_t st2 = sys_put_handle((virt_t)a0, h);
             if (!NT_SUCCESS(st2)) return st2;
@@ -738,6 +843,38 @@ status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5
         }
         return st;
     }
+    case SYS_NtOpenProcessToken: {
+        handle_t h = 0;
+        status_t st = NtOpenProcessToken((handle_t)a0, (access_t)a1, &h);
+        if (NT_SUCCESS(st)) {
+            status_t st2 = sys_put_handle((virt_t)a2, h);
+            if (!NT_SUCCESS(st2)) { NtClose(h); return st2; }
+        }
+        return st;
+    }
+    case SYS_NtQueryInformationToken: {
+        if (caller_user()) {
+            if (a2 < sizeof(token_basic_information_t) || a2 > SYSCALL_COPY_MAX)
+                return STATUS_INFO_LENGTH_MISMATCH;
+            token_basic_information_t inf;
+            memset(&inf, 0, sizeof(inf));
+            status_t st = NtQueryInformationToken((handle_t)a0, &inf, sizeof(inf));
+            if (NT_SUCCESS(st)) copyout((virt_t)a1, &inf, sizeof(inf));
+            return st;
+        }
+        return NtQueryInformationToken((handle_t)a0, (void *)a1, a2);
+    }
+    case SYS_NtDuplicateToken: {
+        handle_t h = 0;
+        status_t st = NtDuplicateToken((handle_t)a0, (access_t)a1, &h);
+        if (NT_SUCCESS(st)) {
+            status_t st2 = sys_put_handle((virt_t)a2, h);
+            if (!NT_SUCCESS(st2)) { NtClose(h); return st2; }
+        }
+        return st;
+    }
+    case SYS_NtSetInformationToken:
+        return NtSetInformationToken((handle_t)a0, (u32)a1);
     default:                       return STATUS_INVALID_SYSTEM_SERVICE;
     }
 }

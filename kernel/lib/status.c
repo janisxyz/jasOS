@@ -31,6 +31,7 @@ const char *status_name(status_t s)
     case STATUS_CANCELLED:              return "CANCELLED";
     case STATUS_NOT_SUPPORTED:          return "NOT_SUPPORTED";
     case STATUS_INVALID_IMAGE_FORMAT:   return "INVALID_IMAGE_FORMAT";
+    case STATUS_NO_TOKEN:               return "NO_TOKEN";
     default:                            return "STATUS_?";
     }
 }

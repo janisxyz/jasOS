@@ -412,6 +412,14 @@ void sched_init(void)
     disp_init(&g_system->disp, DISP_PROCESS, 0);
     g_system->hdr.wait = &g_system->disp;
     strlcpy(g_system->cwd, "/", PATH_MAX);
+    {
+        object_t *tok = ob_create(ob_type_token(), NULL, NULL);
+        if (!tok) panic("sched: system token");
+        token_object_t *t = (token_object_t *)tok;
+        t->pid = g_system->pid;
+        t->integrity = 1; /* admin until logon — do not claim otherwise */
+        g_system->token = t;
+    }
     g_procs[g_nprocs++] = g_system;
 
     status_t st = psp_create_thread(g_system, "idle", idle_entry, NULL, PRIORITY_IDLE, 0, &g_idle);
@@ -534,6 +542,19 @@ status_t psp_create_process(const char *image, process_t *parent, process_t **ou
     strlcpy(p->image, image ? image : "unknown", sizeof(p->image));
     if (parent) strlcpy(p->cwd, parent->cwd, PATH_MAX);
     else strlcpy(p->cwd, "/", PATH_MAX);
+    {
+        object_t *tok = ob_create(ob_type_token(), NULL, NULL);
+        if (!tok) {
+            /* Hardware aspace_init already took a CR3. Fail closed. */
+            vmm_aspace_destroy(&p->aspace);
+            ob_dereference(&p->hdr);
+            return STATUS_NO_MEMORY;
+        }
+        token_object_t *t = (token_object_t *)tok;
+        t->pid = p->pid;
+        t->integrity = 1; /* admin until logon exists — do not claim otherwise */
+        p->token = t;
+    }
     if (g_nprocs < MAX_PROCESSES) {
         g_procs[g_nprocs++] = p;
         ob_reference(&p->hdr); /* table ref; NtClose must not free us */

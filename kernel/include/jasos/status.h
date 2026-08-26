@@ -43,6 +43,7 @@
 #define STATUS_FILE_DELETED            ((status_t)0xC0000123u)
 #define STATUS_NOT_SUPPORTED           ((status_t)0xC00000BBu)
 #define STATUS_INVALID_IMAGE_FORMAT    ((status_t)0xC000007Bu)
+#define STATUS_NO_TOKEN                ((status_t)0xC000007Cu)
 #define STATUS_IN_PAGE_ERROR           ((status_t)0xC0000006u)
 
 #define NT_SUCCESS(s)                  ((i32)(s) >= 0)

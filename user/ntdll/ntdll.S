@@ -52,5 +52,9 @@
     SYSCALL_STUB NtCancelTimer,              35
     SYSCALL_STUB NtWaitForMultipleObjects,   36
     SYSCALL_STUB NtProtectVirtualMemory,     37
+    SYSCALL_STUB NtOpenProcessToken,         38
+    SYSCALL_STUB NtQueryInformationToken,    39
+    SYSCALL_STUB NtDuplicateToken,           40
+    SYSCALL_STUB NtSetInformationToken,      41
 
     .section .note.GNU-stack, "", @progbits

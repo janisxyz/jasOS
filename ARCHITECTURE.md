@@ -217,6 +217,18 @@ See [BUILD.md](BUILD.md).
 | T15 | Unmap never holds VMM across PMM | `pmm_free` under VMM panics rank 2-while-4; collect frames, drop, free |
 | T15 | `vmm_map` / populate `pt_alloc` off VMM | `walk_alloc(create)` took PMM while holding VMM; `vmm_ensure_leaf` fills one table at a time |
 | T15 | `/bin/echo` is ET_EXEC | echo.c unlinked from kernel.elf; sh keeps a builtin echo; spawn path is ring 3 |
+| T16 | `NtCreateProcess` argv | syscall 6 a4=argv a5=argc; strings on the user stack; cap 16×128 |
+| T17 | Token is `OBJ_TOKEN` | was a Process field; open/query/dup are handle-rights; integrity 1 until logon |
+| T18 | Drop-only integrity | `NtSetInformationToken` 1→0 only; raising is `ACCESS_DENIED`; no Se* bitmap |
+
+---
+
+## T16/T17/T18 surface (0.16.0)
+
+- T16: `NtCreateProcessEx(out, access, image, flags, argv, argc)`. Syscall 6 unused a4/a5 become the user argv pointer array and argc. `psp_copy_argv` then `psp_write_initial_stack`: strings at high VA, env NULL, argv NULL, argv[n-1]..[0], argc at low VA. crt0 pops argc into rdi. Caps `USER_ARGC_MAX=16`, `USER_ARG_LEN=128`. argc=0 synthesizes argv[0]=image. sh spawn passes `av`/`ac`.
+- T17: `OBJ_TOKEN`. Every process (including System pid 0) holds a token object. `process_delete` derefs it. Token alloc failure fails process create (and destroys the CR3 taken by `vmm_aspace_init`). Syscalls 38–40: `NtOpenProcessToken` (needs `PROCESS_QUERY_INFORMATION` on a foreign process, or `HANDLE_CURRENT`), `NtQueryInformationToken` (`TOKEN_QUERY` → pid + integrity), `NtDuplicateToken` (`TOKEN_DUPLICATE` copies the snapshot into a new object). Token is not waitable.
+- T18 start: syscall 41 `NtSetInformationToken(h, integrity)`. `TOKEN_ADJUST`. May drop 1→0. Cannot raise. integrity>1 is `INVALID_PARAMETER`. No privileges bitmap — do not print SeDebug or claim logon.
+- Residual: envp is still a single NULL terminator (no 7th syscall arg). sh/ls/cat/ps/crash/init remain kernel-linked. integrity starts at 1 for every process until a logon path exists. Duplicate token does not impersonate.
 
 ---
 

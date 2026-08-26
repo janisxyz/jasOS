@@ -98,6 +98,9 @@ typedef struct process {
     virt_t         user_stack;
     int          (*builtin)(int argc, char **argv);
     bool           user_mode;
+    u32            argc;
+    char           argv[USER_ARGC_MAX][USER_ARG_LEN];
+    token_object_t *token;
 } process_t;
 
 /*

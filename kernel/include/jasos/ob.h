@@ -18,6 +18,7 @@ typedef enum object_kind {
     OBJ_MUTEX,
     OBJ_TIMER,
     OBJ_PIPE,
+    OBJ_TOKEN,
     OBJ_TYPE_MAX
 } object_kind_t;
 
@@ -124,6 +125,14 @@ typedef struct timer_object {
     list_t       timer_link;
 } timer_object_t;
 
+/* T17 start: Token is an object, not a Process field. v1 has two
+   integrity levels and no privileges bitmap. */
+typedef struct token_object {
+    object_t hdr;
+    kpid_t   pid;
+    u32      integrity; /* 0 user, 1 admin/kernel */
+} token_object_t;
+
 typedef struct handle_entry {
     object_t *object;
     access_t  access;
@@ -157,6 +166,7 @@ object_type_t *ob_type_device(void);
 object_type_t *ob_type_event(void);
 object_type_t *ob_type_mutex(void);
 object_type_t *ob_type_timer(void);
+object_type_t *ob_type_token(void);
 
 void     ht_init(handle_table_t *t);
 void     ht_destroy(handle_table_t *t);
