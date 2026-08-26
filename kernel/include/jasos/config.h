@@ -3,9 +3,9 @@
 #include <jasos/types.h>
 
 #define JASOS_VERSION_MAJOR  0
-#define JASOS_VERSION_MINOR  11
+#define JASOS_VERSION_MINOR  12
 #define JASOS_VERSION_PATCH  0
-#define JASOS_VERSION_STR    "0.11.0-aegis"
+#define JASOS_VERSION_STR    "0.12.0-aegis"
 
 
 #define PAGE_SHIFT           12u
@@ -125,6 +125,7 @@
 #define PROCESS_VM_OPERATION     0x0008u
 #define PROCESS_VM_READ          0x0010u
 #define PROCESS_VM_WRITE         0x0020u
+#define PROCESS_DUP_HANDLE       0x0040u
 #define PROCESS_QUERY_INFORMATION 0x0400u
 #define PROCESS_ALL_ACCESS       0x1FFFFFu
 
@@ -172,3 +173,7 @@
 
 #define CREATE_SUSPENDED         0x00000001u
 #define CREATE_NO_IMAGE          0x00000002u
+
+#define DUPLICATE_CLOSE_SOURCE   0x00000001u
+#define DUPLICATE_SAME_ACCESS    0x00000002u
+#define DUPLICATE_INHERIT        0x00000004u

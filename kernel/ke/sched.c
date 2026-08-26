@@ -14,9 +14,10 @@
  *  - Host context switch uses setjmp; a thread that returns from its
  *    entry without calling sched_exit_thread longjmps into freed stack.
  *  - No affinity, no SMT, no load balancer.
- *  - FXSAVE missing (documented in SCHEDULER.md).
+ *  - PI is not a boost chain: only the mutex owner is raised.
  * Fixed here: trampoline always calls sched_exit_thread; idle never
- * exits; init death panics.
+ * exits; init death panics; owner death abandons mutexes; kill_pending
+ * is honoured on first run and on every switch-in.
  */
 
 static list_t     g_ready[PRIORITY_LEVELS];
@@ -71,6 +72,70 @@ void sched_ready(thread_t *t)
     spin_unlock(&g_sched_lock);
 }
 
+void sched_boost(thread_t *t, u32 new_prio)
+{
+    if (!t || t == g_idle) return;
+    if (new_prio >= PRIORITY_LEVELS) new_prio = PRIORITY_LEVELS - 1;
+    spin_lock(&g_sched_lock);
+    u32 old = t->priority;
+    if (old == new_prio) {
+        spin_unlock(&g_sched_lock);
+        return;
+    }
+    if (t->state == THR_READY) {
+        list_remove(&t->ready_link);
+        if (list_empty(&g_ready[old]))
+            g_ready_mask &= ~(1u << old);
+        t->priority = new_prio;
+        ready_insert(t);
+    } else {
+        t->priority = new_prio;
+    }
+    pcb_t *cpu = ke_pcb();
+    if (cpu->current && t != cpu->current && t->priority > cpu->current->priority)
+        cpu->need_resched = true;
+    if (cpu->current == t && t->priority < old)
+        cpu->need_resched = true;
+    spin_unlock(&g_sched_lock);
+}
+
+static void thread_unlink_waits(thread_t *t)
+{
+    if (t->wait_multi_count) {
+        for (u32 i = 0; i < t->wait_multi_count; i++) {
+            dispatcher_t *d = t->wait_multi[i].object;
+            if (!d) continue;
+            spin_lock(&d->lock);
+            list_remove(&t->wait_multi[i].obj_link);
+            t->wait_multi[i].object = NULL;
+            spin_unlock(&d->lock);
+        }
+        t->wait_multi_count = 0;
+    } else if (t->wait.object) {
+        dispatcher_t *d = t->wait.object;
+        spin_lock(&d->lock);
+        list_remove(&t->wait.obj_link);
+        t->wait.object = NULL;
+        spin_unlock(&d->lock);
+    }
+}
+
+void sched_kill_thread(thread_t *t, status_t st)
+{
+    if (!t || t == g_idle) return;
+    if (t->state == THR_TERMINATED) return;
+    if (t == ke_current()) {
+        sched_exit_thread(st);
+        return;
+    }
+    t->kill_pending = true;
+    t->exit_status = st;
+    if (t->state == THR_WAITING) {
+        thread_unlink_waits(t);
+        sched_ready(t);
+    }
+}
+
 #ifdef JASOS_HOST
 static jmp_buf g_boot_jmp;
 static int     g_boot_valid;
@@ -82,12 +147,9 @@ static int live_nonidle(void)
     for (u32 i = 0; i < g_nprocs; i++) {
         process_t *p = g_procs[i];
         if (!p) continue;
-        for (list_t *e = p->threads.next; e != &p->threads; e = e->next) {
-            thread_t *th = CONTAINER_OF(e, thread_t, proc_link);
-            if (th == g_idle) continue;
-            if (th->state == THR_READY || th->state == THR_RUNNING || th->state == THR_WAITING)
-                return 1;
-        }
+        u32 live = p->thread_count;
+        if (p == g_system && live > 0) live--; /* idle */
+        if (live > 0) return 1;
     }
     return 0;
 }
@@ -121,6 +183,7 @@ __attribute__((noinline, noclone, used))
 void thread_trampoline(void)
 {
     thread_t *t = ke_current();
+    if (t && t->kill_pending) sched_exit_thread(t->exit_status);
     if (t && t->ctx.entry) t->ctx.entry(t->ctx.arg);
     sched_exit_thread(STATUS_SUCCESS);
 }
@@ -152,6 +215,7 @@ void context_switch(context_t *old, context_t *newc)
 void thread_trampoline(void)
 {
     thread_t *t = ke_current();
+    if (t && t->kill_pending) sched_exit_thread(t->exit_status);
     void (*fn)(void *) = (void (*)(void *))t->ctx.rbx;
     void *arg = (void *)t->ctx.r12;
     fn(arg);
@@ -193,6 +257,9 @@ void sched_reschedule(void)
 #endif
     if (cur) context_switch(&cur->ctx, &next->ctx);
     else     context_switch(NULL, &next->ctx);
+    thread_t *self = ke_current();
+    if (self && self->kill_pending)
+        sched_exit_thread(self->exit_status);
 }
 
 void sched_yield(void)
@@ -205,23 +272,8 @@ void sched_exit_thread(status_t st)
     thread_t *t = ke_current();
     /* Dying waiter must not stay on an object's wait_list. One DISP
        at a time; then we take SCHED in reschedule. */
-    if (t->wait_multi_count) {
-        for (u32 i = 0; i < t->wait_multi_count; i++) {
-            dispatcher_t *d = t->wait_multi[i].object;
-            if (!d) continue;
-            spin_lock(&d->lock);
-            list_remove(&t->wait_multi[i].obj_link);
-            t->wait_multi[i].object = NULL;
-            spin_unlock(&d->lock);
-        }
-        t->wait_multi_count = 0;
-    } else if (t->wait.object) {
-        dispatcher_t *d = t->wait.object;
-        spin_lock(&d->lock);
-        list_remove(&t->wait.obj_link);
-        t->wait.object = NULL;
-        spin_unlock(&d->lock);
-    }
+    thread_unlink_waits(t);
+    ke_mutex_abandon_owned(t);
 #ifdef JASOS_HOST
     if (t->kstack) {
         u8 *g = t->kstack - PAGE_SIZE;
@@ -269,6 +321,15 @@ void sched_exit_thread(status_t st)
 
         }
     }
+#ifdef JASOS_HOST
+    /* Do not setcontext a stale idle frame after a previous longjmp. */
+    if (!live_nonidle() && g_boot_valid) {
+        g_host_stop = true;
+        ke_pcb()->current = g_idle;
+        ke_pcb()->current_process = g_system;
+        longjmp(g_boot_jmp, 1);
+    }
+#endif
     ke_pcb()->current = NULL;
     sched_reschedule();
     panic("exited thread resumed");
@@ -363,6 +424,9 @@ void sched_start(void)
     kprintf("sched: dropping boot context\n");
 #ifdef JASOS_HOST
     g_host_stop = false;
+    g_idle->ctx.valid = 0;
+    if (g_idle->state == THR_RUNNING)
+        g_idle->state = THR_READY;
     if (setjmp(g_boot_jmp) != 0) {
         ke_pcb()->current = g_idle;
         ke_pcb()->current_process = g_system;
@@ -393,6 +457,9 @@ status_t psp_create_thread(process_t *p, const char *name, void (*entry)(void *)
     t->priority = prio;
     t->saved_priority = prio;
     t->quantum_left = QUANTUM_TICKS;
+    t->kill_pending = false;
+    t->wait_boost = 0;
+    list_init(&t->owned_mutexes);
     t->kstack_size = KSTACK_SIZE;
 #ifdef JASOS_HOST
     {

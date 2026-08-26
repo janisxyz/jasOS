@@ -68,6 +68,7 @@ typedef struct thread {
     list_t            ready_link;
     list_t            proc_link;
     list_t            timer_link;
+    list_t            owned_mutexes;
     status_t          exit_status;
     char              name[32];
     status_t          last_status;
@@ -75,6 +76,7 @@ typedef struct thread {
     virt_t            user_rsp;
     u8                fpu_state[512] ALIGNED(16);
     bool              fpu_used;
+    bool              kill_pending;
 } thread_t;
 
 typedef struct process {
@@ -129,6 +131,8 @@ void      sched_ready(thread_t *t);
 void      sched_yield(void);
 void      sched_reschedule(void);
 void      sched_exit_thread(status_t st);
+void      sched_kill_thread(thread_t *t, status_t st);
+void      sched_boost(thread_t *t, u32 new_prio);
 void      ke_on_tick(void);
 u64       ke_ticks(void);
 
@@ -144,6 +148,9 @@ status_t  ke_set_event(event_object_t *e);
 status_t  ke_reset_event(event_object_t *e);
 status_t  ke_release_mutex(mutex_object_t *m);
 status_t  ke_acquire_mutex(mutex_object_t *m, u64 timeout_ticks);
+void      ke_mutex_own(mutex_object_t *m, thread_t *t);
+void      ke_mutex_disown(mutex_object_t *m);
+void      ke_mutex_abandon_owned(thread_t *t);
 
 void      context_switch(context_t *old, context_t *newc);
 void      thread_trampoline(void);

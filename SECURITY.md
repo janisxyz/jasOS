@@ -42,6 +42,12 @@ closed vs residual.
 | `NtAllocate` pre-backed every page | demand-zero + `PTE_SW_COMMIT`; PF/copyin populate |
 | copyin required `PTE_P` | hardware probe is VAD+prot; populate on copy |
 | Mapping bomb hits PMM | `USER_COMMIT_MAX` 32 MiB + overlap reject |
+| Mutex owner death hangs waiters | owned-mutex list; death abandons with `STATUS_ABANDONED` |
+| `wait_boost` was dead | waiter donates via `sched_boost`; unwind when no mutexes remain |
+| `NtTerminateThread` self-only | handle lookup + `kill_pending`; idle refused |
+| Inherit bit always 0 | `ht_set_inherit` / `DUPLICATE_INHERIT` / `ht_inherit_table` on create |
+| Host whole-VAD shadow | per-page 4 KiB; 1 MiB VAD + 1 byte write stays under 32 KiB heap |
+| `ht_destroy` kfree under HANDLE | snapshot slot, drop lock, then close/deref |
 
 ## Residual (honest)
 

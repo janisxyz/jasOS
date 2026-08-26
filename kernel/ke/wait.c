@@ -10,17 +10,67 @@
  *    concurrent waiter can steal a sync event between the wake and
  *    the consume. NT has the same class of race without a rundown.
  *  - 16-object cap. A 17th handle fails closed.
+ *  - PI is single-donation, not a full boost chain. A waiter of a
+ *    waiter of a mutex owner does not propagate. Documented.
  * Fixed here: mutex ownership transfers in disp_wake_one; abandoned
  * mutex wakes with STATUS_ABANDONED; wait never holds DISP across
  * a SCHED acquire without the T3 ranking (DISP=9 < SCHED=10);
- * WaitForMultiple enqueues a wait_block on every object.
+ * WaitForMultiple enqueues a wait_block on every object;
+ * owner death abandons every mutex on the thread's owned list;
+ * a higher-priority waiter donates to the mutex owner (sched_boost).
  */
+
+void ke_mutex_own(mutex_object_t *m, thread_t *t)
+{
+    if (!m || !t) return;
+    list_remove(&m->owned_link);
+    list_insert_tail(&t->owned_mutexes, &m->owned_link);
+}
+
+void ke_mutex_disown(mutex_object_t *m)
+{
+    if (!m) return;
+    list_remove(&m->owned_link);
+}
+
+void ke_mutex_abandon_owned(thread_t *t)
+{
+    if (!t) return;
+    while (!list_empty(&t->owned_mutexes)) {
+        mutex_object_t *m = CONTAINER_OF(t->owned_mutexes.next, mutex_object_t, owned_link);
+        list_remove(&m->owned_link);
+        spin_lock(&m->disp.lock);
+        m->owner = NULL;
+        m->recursion = 0;
+        m->abandoned = true;
+        if (!list_empty(&m->disp.wait_list)) {
+            m->disp.signal_state = 0;
+            disp_wake_one(&m->disp, STATUS_ABANDONED);
+        } else {
+            m->disp.signal_state = 1;
+        }
+        spin_unlock(&m->disp.lock);
+    }
+}
+
+static void mutex_donate(mutex_object_t *m, thread_t *waiter)
+{
+    thread_t *owner = m->owner;
+    if (!owner || !waiter || owner == waiter) return;
+    if (waiter->priority <= owner->priority) return;
+    if (!owner->wait_boost)
+        owner->saved_priority = owner->priority;
+    owner->wait_boost = 1;
+    sched_boost(owner, waiter->priority);
+}
 
 status_t ke_wait_object(dispatcher_t *d, u64 timeout_ticks)
 {
     if (!d) return STATUS_INVALID_PARAMETER;
     thread_t *t = ke_current();
     if (!t) return STATUS_INVALID_PARAMETER;
+    if (t->kill_pending)
+        sched_exit_thread(t->exit_status);
 
     spin_lock(&d->lock);
     if (d->type == DISP_MUTANT) {
@@ -36,9 +86,11 @@ status_t ke_wait_object(dispatcher_t *d, u64 timeout_ticks)
             m->recursion = 1;
             status_t st = m->abandoned ? STATUS_ABANDONED : STATUS_SUCCESS;
             m->abandoned = false;
+            ke_mutex_own(m, t);
             spin_unlock(&d->lock);
             return st;
         }
+        mutex_donate(m, t);
     } else if (d->signal_state > 0) {
         if (d->type == DISP_SYNCHRONIZATION_EVENT || d->type == DISP_TIMER)
             d->signal_state = 0;
@@ -62,6 +114,8 @@ status_t ke_wait_object(dispatcher_t *d, u64 timeout_ticks)
     t->wait_timeout_tick = ke_ticks() + (timeout_ticks == (u64)-1 ? 0 : timeout_ticks);
     spin_unlock(&d->lock);
     sched_reschedule();
+    if (t->kill_pending)
+        sched_exit_thread(t->exit_status);
     return t->wait.wake_status;
 }
 
@@ -95,6 +149,7 @@ status_t ke_release_mutex(mutex_object_t *m)
         return STATUS_SUCCESS;
     }
     m->owner = NULL;
+    ke_mutex_disown(m);
     if (list_empty(&m->disp.wait_list)) {
         m->disp.signal_state = 1;
         spin_unlock(&m->disp.lock);
@@ -103,9 +158,9 @@ status_t ke_release_mutex(mutex_object_t *m)
         disp_wake_one(&m->disp, STATUS_SUCCESS);
         spin_unlock(&m->disp.lock);
     }
-    if (t->priority != t->saved_priority) {
-        t->priority = t->saved_priority;
-        ke_pcb()->need_resched = true;
+    if (list_empty(&t->owned_mutexes) && t->wait_boost) {
+        t->wait_boost = 0;
+        sched_boost(t, t->saved_priority);
     }
     return STATUS_SUCCESS;
 }
@@ -133,6 +188,8 @@ status_t ke_wait_multiple(dispatcher_t **objs, u32 count, bool wait_all, u64 tim
         return STATUS_INVALID_PARAMETER;
     thread_t *t = ke_current();
     if (!t) return STATUS_INVALID_PARAMETER;
+    if (t->kill_pending)
+        sched_exit_thread(t->exit_status);
 
     for (u32 i = 0; i < count; i++)
         if (!objs[i]) return STATUS_INVALID_PARAMETER;
@@ -185,6 +242,10 @@ status_t ke_wait_multiple(dispatcher_t **objs, u32 count, bool wait_all, u64 tim
             ke_wait_object(objs[i], 0);
             return (status_t)i;
         }
+        if (objs[i]->type == DISP_MUTANT) {
+            mutex_object_t *m = CONTAINER_OF(objs[i], mutex_object_t, disp);
+            mutex_donate(m, t);
+        }
         list_insert_tail(&objs[i]->wait_list, &t->wait_multi[i].obj_link);
         spin_unlock(&objs[i]->lock);
     }
@@ -193,6 +254,9 @@ status_t ke_wait_multiple(dispatcher_t **objs, u32 count, bool wait_all, u64 tim
     t->wait_timed = (timeout_ticks != (u64)-1);
     t->wait_timeout_tick = ke_ticks() + (timeout_ticks == (u64)-1 ? 0 : timeout_ticks);
     sched_reschedule();
+
+    if (t->kill_pending)
+        sched_exit_thread(t->exit_status);
 
     u32 which = 0;
     for (u32 i = 0; i < count; i++) {

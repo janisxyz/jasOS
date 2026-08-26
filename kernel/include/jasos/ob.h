@@ -105,6 +105,7 @@ typedef struct mutex_object {
     struct thread *owner;
     u32            recursion;
     bool           abandoned;
+    list_t         owned_link;
 } mutex_object_t;
 
 typedef struct section_object {
@@ -160,10 +161,13 @@ object_type_t *ob_type_timer(void);
 void     ht_init(handle_table_t *t);
 void     ht_destroy(handle_table_t *t);
 status_t ht_insert(handle_table_t *t, object_t *o, access_t access, handle_t *out);
+status_t ht_insert_ex(handle_table_t *t, object_t *o, access_t access, handle_t *out, u8 inherit, u8 protect_close);
 status_t ht_lookup(handle_table_t *t, handle_t h, access_t required, object_kind_t expect, object_t **out);
 status_t ht_lookup_ex(handle_table_t *t, handle_t h, access_t required, object_kind_t expect, object_t **out, access_t *granted);
 status_t ht_close(handle_table_t *t, handle_t h);
 status_t ht_duplicate(handle_table_t *src, handle_t h, handle_table_t *dst, access_t access, handle_t *out);
+status_t ht_set_inherit(handle_table_t *t, handle_t h, bool inherit);
+status_t ht_inherit_table(handle_table_t *src, handle_table_t *dst);
 access_t ob_map_generic(object_type_t *type, access_t access);
 
 status_t ob_create_event(const char *name, bool auto_reset, bool initial, event_object_t **out);

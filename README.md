@@ -37,6 +37,9 @@ Clone it. `make`. `make run`. That is how you boot it.
   IST `.bss` gone; user `NtCreateThread` rejects kernel RIP on host
 - 0.11: demand-zero VADs (`PTE_SW_COMMIT`), VAD probe for copyin, 32 MiB
   commit cap, overlap reject, stack guard is not a VAD
+- 0.12: mutex rundown + wait-boost, wait on process/thread, terminate
+  by handle, handle inherit, per-page host shadow, `ht_destroy` rank fix
+
 
 
 

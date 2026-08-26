@@ -70,7 +70,7 @@ status_t NtCreatePipe(handle_t *read_out, handle_t *write_out);
 status_t NtQueryInformationProcess(handle_t h, void *buf, u64 n);
 status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 flags);
 status_t NtTerminateThread(handle_t h, status_t st);
-status_t NtDuplicateObject(handle_t src_proc, handle_t src, handle_t dst_proc, handle_t *out, access_t access);
+status_t NtDuplicateObject(handle_t src_proc, handle_t src, handle_t dst_proc, handle_t *out, access_t access, u32 flags);
 status_t NtQueryObject(handle_t h, void *buf, u64 n);
 status_t NtCreateSection(handle_t *out, access_t access, u64 size, u32 prot);
 status_t NtMapViewOfSection(handle_t section, handle_t proc, virt_t *base, u64 size, u32 prot);

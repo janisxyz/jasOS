@@ -628,7 +628,7 @@ status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5
     case SYS_NtTerminateThread:    return NtTerminateThread((handle_t)a0, (status_t)a1);
     case SYS_NtDuplicateObject: {
         handle_t h = 0;
-        status_t st = NtDuplicateObject((handle_t)a0, (handle_t)a1, (handle_t)a2, &h, (access_t)a4);
+        status_t st = NtDuplicateObject((handle_t)a0, (handle_t)a1, (handle_t)a2, &h, (access_t)a4, (u32)a5);
         if (NT_SUCCESS(st)) sys_put_handle((virt_t)a3, h);
         return st;
     }

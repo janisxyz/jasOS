@@ -64,7 +64,8 @@ typedef struct aspace {
     virt_t     brk;
     virt_t     stack_base;
 #ifdef JASOS_HOST
-    u8     *host_shadow[MAX_VADS];
+    u8    **host_pages[MAX_VADS];
+    u32     host_npages[MAX_VADS];
 #endif
 } aspace_t;
 

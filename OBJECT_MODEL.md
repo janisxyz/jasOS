@@ -179,3 +179,17 @@ T10: `Ramdisk0` is a Device object with IRP_MJ_CREATE/CLOSE/READ/WRITE.
 `/dev/ram0` is a VNODE_BLOCK whose `device` pointer is that object.
 Bytes live in a 1 MiB kernel backing store, not in the vnode `data`
 blob. Serial0 is still write-only CHAR.
+
+T12: mutex ownership is a list on the thread, not a hope. Death
+walks `owned_mutexes`, marks abandoned, wakes one waiter with
+`STATUS_ABANDONED` (or leaves `signal_state=1` if nobody waits).
+Handle inherit: `ht_insert_ex` / `ht_set_inherit` / `ht_inherit_table`.
+`NtCreateProcess` copies inherit-marked slots after stdio seed.
+`NtDuplicateObject` requires `PROCESS_DUP_HANDLE` on foreign process
+handles, keeps both process refs until the copy finishes, honours
+`DUPLICATE_CLOSE_SOURCE | SAME_ACCESS | INHERIT`. `ht_destroy` drops
+the table lock before `close_fn` / `ob_dereference` (HEAP is rank 3).
+Process and thread dispatcher objects are signaled on the way to
+TERMINATED; host selftest waits on both.
+
+

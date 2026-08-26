@@ -161,6 +161,8 @@ status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 
         return st;
     }
     seed_stdio(p);
+    if (parent)
+        ht_inherit_table(&parent->handles, &p->handles);
 
     int (*mainfn)(int, char **) = NULL;
     int is_builtin = builtin_lookup(image, &mainfn);
@@ -215,39 +217,58 @@ status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 
 
 status_t NtTerminateThread(handle_t h, status_t stcode)
 {
-    if (h != HANDLE_CURRENT) return STATUS_NOT_IMPLEMENTED;
-    sched_exit_thread(stcode);
-    return stcode;
+    if (h == HANDLE_CURRENT) {
+        sched_exit_thread(stcode);
+        return stcode;
+    }
+    object_t *o;
+    status_t st = ht_lookup(ke_current_process() ? &ke_current_process()->handles : NULL,
+                            h, THREAD_TERMINATE, OBJ_THREAD, &o);
+    if (!NT_SUCCESS(st)) return st;
+    thread_t *t = (thread_t *)o;
+    sched_kill_thread(t, stcode);
+    ob_dereference(o);
+    return STATUS_SUCCESS;
 }
 
 status_t NtDuplicateObject(handle_t src_proc, handle_t src, handle_t dst_proc,
-                           handle_t *out, access_t access)
+                           handle_t *out, access_t access, u32 flags)
 {
     if (!out) return STATUS_INVALID_PARAMETER;
-    process_t *sp, *dp;
-    handle_table_t *stbl, *dtbl;
+    process_t *sp = NULL, *dp = NULL;
+    object_t *so = NULL, *dobj = NULL;
     if (src_proc == HANDLE_CURRENT) sp = ke_current_process();
     else {
-        object_t *o;
         status_t st = ht_lookup(ke_current_process() ? &ke_current_process()->handles : NULL,
-                                src_proc, PROCESS_QUERY_INFORMATION, OBJ_PROCESS, &o);
+                                src_proc, PROCESS_DUP_HANDLE, OBJ_PROCESS, &so);
         if (!NT_SUCCESS(st)) return st;
-        sp = (process_t *)o;
-        ob_dereference(o);
+        sp = (process_t *)so;
     }
     if (dst_proc == HANDLE_CURRENT) dp = ke_current_process();
     else {
-        object_t *o;
         status_t st = ht_lookup(ke_current_process() ? &ke_current_process()->handles : NULL,
-                                dst_proc, PROCESS_QUERY_INFORMATION, OBJ_PROCESS, &o);
-        if (!NT_SUCCESS(st)) return st;
-        dp = (process_t *)o;
-        ob_dereference(o);
+                                dst_proc, PROCESS_DUP_HANDLE, OBJ_PROCESS, &dobj);
+        if (!NT_SUCCESS(st)) {
+            if (so) ob_dereference(so);
+            return st;
+        }
+        dp = (process_t *)dobj;
     }
-    if (!sp || !dp) return STATUS_INVALID_HANDLE;
-    stbl = &sp->handles;
-    dtbl = &dp->handles;
-    return ht_duplicate(stbl, src, dtbl, access, out);
+    if (!sp || !dp) {
+        if (so) ob_dereference(so);
+        if (dobj) ob_dereference(dobj);
+        return STATUS_INVALID_HANDLE;
+    }
+    if (flags & DUPLICATE_SAME_ACCESS)
+        access = 0;
+    status_t st = ht_duplicate(&sp->handles, src, &dp->handles, access, out);
+    if (NT_SUCCESS(st) && (flags & DUPLICATE_INHERIT))
+        ht_set_inherit(&dp->handles, *out, true);
+    if (NT_SUCCESS(st) && (flags & DUPLICATE_CLOSE_SOURCE))
+        ht_close(&sp->handles, src);
+    if (so) ob_dereference(so);
+    if (dobj) ob_dereference(dobj);
+    return st;
 }
 
 status_t NtQueryObject(handle_t h, void *buf, u64 n)

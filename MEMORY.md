@@ -176,5 +176,14 @@ before PMM. Kernel `vmm_write_aspace` may fill an RX VAD (ELF load);
 a user write fault on that VAD still returns false. Residual: host
 shadow is still a whole-VAD `kalloc` on first touch, not per-page.
 
+T12: host shadow is per-page. Each VAD has `host_pages[]` (pointer
+array, allocated on first populate) and one 4 KiB slab per touched
+page. A 1 MiB committed VAD plus a one-byte write no longer allocates
+a 1 MiB slab. `vmm_write_aspace` / `vmm_read_aspace` copy within the
+current page, matching the hardware HHDM path. Residual: the pointer
+array for a 32 MiB VAD is 64 KiB of pointers — still fail-closed by
+`USER_COMMIT_MAX`, not a frame bomb.
+
+
 
 

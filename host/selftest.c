@@ -16,6 +16,74 @@
 static volatile int g_ping, g_pong;
 static event_object_t *g_e1, *g_e2;
 
+static mutex_object_t *g_pi_m;
+static volatile u32 g_pi_prio;
+static volatile int g_pi_phase;
+
+static void pi_low(void *arg)
+{
+    (void)arg;
+    ke_acquire_mutex(g_pi_m, (u64)-1);
+    g_pi_phase = 1;
+    while (g_pi_phase == 1)
+        sched_yield();
+    g_pi_prio = ke_current()->priority;
+    ke_release_mutex(g_pi_m);
+}
+
+static void pi_high(void *arg)
+{
+    (void)arg;
+    while (g_pi_phase < 1)
+        sched_yield();
+    g_pi_phase = 2;
+    ke_acquire_mutex(g_pi_m, (u64)-1);
+    ke_release_mutex(g_pi_m);
+}
+
+static mutex_object_t *g_ab_m;
+static volatile status_t g_ab_st;
+
+static void ab_die(void *arg)
+{
+    (void)arg;
+    ke_acquire_mutex(g_ab_m, (u64)-1);
+    sched_exit_thread(STATUS_SUCCESS);
+}
+
+static void ab_wait(void *arg)
+{
+    (void)arg;
+    g_ab_st = ke_acquire_mutex(g_ab_m, 10000);
+    if (g_ab_st == STATUS_ABANDONED || g_ab_st == STATUS_SUCCESS)
+        ke_release_mutex(g_ab_m);
+}
+
+static event_object_t *g_never;
+static volatile int g_victim_ran;
+static handle_t g_victim_h;
+
+static void victim_wait(void *arg)
+{
+    (void)arg;
+    g_victim_ran = 1;
+    ke_wait_object(&g_never->disp, (u64)-1);
+    g_victim_ran = 2;
+}
+
+static void killer_fn(void *arg)
+{
+    (void)arg;
+    while (!g_victim_ran)
+        sched_yield();
+    NtTerminateThread(g_victim_h, STATUS_THREAD_IS_TERMINATING);
+}
+
+static void just_exit(void *arg)
+{
+    (void)arg;
+}
+
 static void ping_fn(void *arg)
 {
     (void)arg;
@@ -141,7 +209,7 @@ int selftest_run(void)
         handle_t r = 0, w = 0, w2 = 0;
         st = NtCreatePipe(&r, &w);
         EXPECT(NT_SUCCESS(st), "dup-pipe create");
-        st = NtDuplicateObject(HANDLE_CURRENT, w, HANDLE_CURRENT, &w2, FILE_WRITE_DATA);
+        st = NtDuplicateObject(HANDLE_CURRENT, w, HANDLE_CURRENT, &w2, FILE_WRITE_DATA, 0);
         EXPECT(NT_SUCCESS(st) && w2, "dup write handle");
         u64 wn = 0, rn = 0;
         st = NtWriteFile(w, "ab", 2, 0, &wn);
@@ -412,13 +480,16 @@ int selftest_run(void)
             }
             EXPECT(vidx >= 0, "demand-zero VAD inserted");
 #ifdef JASOS_HOST
-            EXPECT(up->aspace.host_shadow[vidx] == NULL, "demand-zero shadow lazy");
+            EXPECT(up->aspace.host_pages[vidx] == NULL, "demand-zero shadow lazy");
 #endif
             const char msg[] = "demand-zero";
             st = vmm_write_aspace(&up->aspace, dz, msg, sizeof(msg));
             EXPECT(NT_SUCCESS(st), "demand-zero populate write");
 #ifdef JASOS_HOST
-            EXPECT(up->aspace.host_shadow[vidx] != NULL, "demand-zero shadow filled");
+            EXPECT(up->aspace.host_pages[vidx] && up->aspace.host_pages[vidx][0],
+                   "demand-zero page filled");
+            EXPECT(up->aspace.host_npages[vidx] == 16, "demand-zero npages");
+            EXPECT(up->aspace.host_pages[vidx][1] == NULL, "sibling page still lazy");
 #endif
             char back[16];
             memset(back, 0, sizeof(back));
@@ -449,11 +520,170 @@ int selftest_run(void)
             EXPECT(st == STATUS_INSUFFICIENT_RESOURCES, "commit cap");
             st = vmm_free_user(up, dz, 16u * PAGE_SIZE);
             EXPECT(NT_SUCCESS(st), "demand-zero free");
+#ifdef JASOS_HOST
+            {
+                int gone = 1;
+                for (u32 i = 0; i < up->aspace.vad_count; i++)
+                    if (up->aspace.vads[i].start == dz) gone = 0;
+                EXPECT(gone, "demand-zero VAD removed");
+            }
+#else
             EXPECT(pmm_free_pages() == free0, "demand-zero frames returned");
+#endif
+
+            /* Per-page host shadow: a 1 MiB VAD plus one-byte write must
+               not allocate a 1 MiB slab. */
+            {
+                virt_t big = 0x0000000005000000ULL;
+                u64 h0 = heap_used();
+                st = vmm_alloc_user(up, &big, 256u * PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+                EXPECT(NT_SUCCESS(st), "1MiB VAD alloc");
+                u64 h1 = heap_used();
+                char one = 0x5A;
+                st = vmm_write_aspace(&up->aspace, big, &one, 1);
+                EXPECT(NT_SUCCESS(st), "1MiB VAD first byte");
+                u64 h2 = heap_used();
+                EXPECT(h2 - h0 < 32u * 1024u, "per-page shadow not whole VAD");
+                (void)h1;
+                char back = 0;
+                st = vmm_read_aspace(&up->aspace, &back, big, 1);
+                EXPECT(NT_SUCCESS(st) && back == 0x5A, "1MiB VAD readback");
+                st = vmm_free_user(up, big, 256u * PAGE_SIZE);
+                EXPECT(NT_SUCCESS(st), "1MiB VAD free");
+            }
         }
 
         ob_dereference(o);
         NtClose(ph);
+    }
+
+    /* Wait on a dead thread: signaled on the way to TERMINATED. */
+    {
+        thread_t *ex = NULL;
+        st = psp_create_thread(psp_system_process(), "just-exit", just_exit, NULL,
+                               PRIORITY_NORMAL, 0, &ex);
+        EXPECT(NT_SUCCESS(st) && ex, "exit-thread create");
+        sched_start();
+        st = ke_wait_object(&ex->disp, 0);
+        EXPECT(st == STATUS_SUCCESS, "wait on dead thread");
+        EXPECT(ex->state == THR_TERMINATED, "dead thread TERMINATED");
+    }
+
+    /* Wait on a process: /bin/hello ELF stub exits and signals the process. */
+    {
+        handle_t ph = 0;
+        st = NtCreateProcess(&ph, PROCESS_ALL_ACCESS, "/bin/hello", 0);
+        EXPECT(NT_SUCCESS(st) && ph, "hello process for wait");
+        object_t *o = NULL;
+        st = ht_lookup(&psp_system_process()->handles, ph, 0, OBJ_PROCESS, &o);
+        EXPECT(NT_SUCCESS(st) && o, "hello process lookup");
+        process_t *hp = (process_t *)o;
+        sched_start();
+        st = ke_wait_object(&hp->disp, 0);
+        EXPECT(st == STATUS_SUCCESS, "wait on dead process");
+        EXPECT(hp->terminating, "process terminating");
+        ob_dereference(o);
+        NtClose(ph);
+    }
+
+    /* Mutex owner death abandons waiters. */
+    {
+        g_ab_st = (status_t)0xFFFFFFFFu;
+        st = ob_create_mutex(NULL, false, &g_ab_m);
+        EXPECT(NT_SUCCESS(st) && g_ab_m, "abandon mutex create");
+        thread_t *d = NULL, *w = NULL;
+        st = psp_create_thread(psp_system_process(), "ab-die", ab_die, NULL,
+                               PRIORITY_HIGH, 0, &d);
+        EXPECT(NT_SUCCESS(st) && d, "abandon owner thread");
+        st = psp_create_thread(psp_system_process(), "ab-wait", ab_wait, NULL,
+                               PRIORITY_NORMAL, 0, &w);
+        EXPECT(NT_SUCCESS(st) && w, "abandon waiter thread");
+        sched_start();
+        EXPECT(g_ab_st == STATUS_ABANDONED, "mutex abandoned on owner death");
+    }
+
+    /* Priority inheritance: high waiter donates to low owner. */
+    {
+        g_pi_phase = 0;
+        g_pi_prio = 0;
+        st = ob_create_mutex(NULL, false, &g_pi_m);
+        EXPECT(NT_SUCCESS(st) && g_pi_m, "pi mutex create");
+        thread_t *lo = NULL, *hi = NULL;
+        st = psp_create_thread(psp_system_process(), "pi-low", pi_low, NULL,
+                               PRIORITY_NORMAL, 0, &lo);
+        EXPECT(NT_SUCCESS(st) && lo, "pi low thread");
+        st = psp_create_thread(psp_system_process(), "pi-high", pi_high, NULL,
+                               PRIORITY_HIGH, 0, &hi);
+        EXPECT(NT_SUCCESS(st) && hi, "pi high thread");
+        sched_start();
+        EXPECT(g_pi_prio == PRIORITY_HIGH, "mutex wait-boost donated");
+        EXPECT(lo->priority == PRIORITY_NORMAL, "boost unwound on release");
+        EXPECT(lo->wait_boost == 0, "wait_boost cleared");
+    }
+
+    /* NtTerminateThread by handle kills a waiter. */
+    {
+        g_victim_ran = 0;
+        g_victim_h = 0;
+        st = ob_create_event(NULL, false, false, &g_never);
+        EXPECT(NT_SUCCESS(st) && g_never, "kill event");
+        thread_t *v = NULL, *k = NULL;
+        st = psp_create_thread(psp_system_process(), "victim", victim_wait, NULL,
+                               PRIORITY_NORMAL, 0, &v);
+        EXPECT(NT_SUCCESS(st) && v, "victim thread");
+        st = ht_insert(&psp_system_process()->handles, &v->hdr, THREAD_ALL_ACCESS, &g_victim_h);
+        EXPECT(NT_SUCCESS(st) && g_victim_h, "victim handle");
+        st = psp_create_thread(psp_system_process(), "killer", killer_fn, NULL,
+                               PRIORITY_HIGH, 0, &k);
+        EXPECT(NT_SUCCESS(st) && k, "killer thread");
+        sched_start();
+        EXPECT(v->state == THR_TERMINATED, "victim terminated");
+        EXPECT(g_victim_ran == 1, "victim did not resume wait");
+        st = ke_wait_object(&v->disp, 0);
+        EXPECT(st == STATUS_SUCCESS, "wait on killed thread");
+        NtClose(g_victim_h);
+    }
+
+    /* Handle inherit: mark a named event, spawn suspended child, child table has it. */
+    {
+        handle_t eh = 0;
+        st = NtCreateEvent(&eh, "InheritMe", false, false);
+        EXPECT(NT_SUCCESS(st) && eh, "inherit event");
+        st = ht_set_inherit(&psp_system_process()->handles, eh, true);
+        EXPECT(NT_SUCCESS(st), "set inherit");
+        handle_t ph = 0;
+        st = NtCreateProcess(&ph, PROCESS_ALL_ACCESS, "/bin/hello", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st) && ph, "inherit child");
+        object_t *o = NULL;
+        st = ht_lookup(&psp_system_process()->handles, ph, 0, OBJ_PROCESS, &o);
+        EXPECT(NT_SUCCESS(st) && o, "inherit child lookup");
+        process_t *ch = (process_t *)o;
+        int found = 0;
+        for (u32 i = 1; i < HANDLE_TABLE_SLOTS; i++) {
+            if (ch->handles.slots[i].object &&
+                ch->handles.slots[i].object->type &&
+                ch->handles.slots[i].object->type->kind == OBJ_EVENT &&
+                ch->handles.slots[i].inherit)
+                found = 1;
+        }
+        EXPECT(found, "child inherited event");
+        ob_dereference(o);
+        NtClose(ph);
+        NtClose(eh);
+    }
+
+    /* DuplicateObject DUPLICATE_INHERIT + DUPLICATE_SAME_ACCESS. */
+    {
+        handle_t e = 0, e2 = 0;
+        st = NtCreateEvent(&e, NULL, false, false);
+        EXPECT(NT_SUCCESS(st) && e, "dup flags event");
+        st = NtDuplicateObject(HANDLE_CURRENT, e, HANDLE_CURRENT, &e2, 0,
+                               DUPLICATE_SAME_ACCESS | DUPLICATE_INHERIT);
+        EXPECT(NT_SUCCESS(st) && e2 && e2 != e, "dup inherit handle");
+        u32 i = HANDLE_INDEX(e2);
+        EXPECT(psp_system_process()->handles.slots[i].inherit, "dup inherit bit");
+        NtClose(e2);
+        NtClose(e);
     }
 
     kprintf("selftest: all assertions passed\n");

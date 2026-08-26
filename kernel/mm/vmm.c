@@ -49,13 +49,28 @@ static status_t vmm_populate_page(aspace_t *as, virt_t page, bool write);
 
 #ifdef JASOS_HOST
 
+static void host_pages_free(aspace_t *as, u32 i)
+{
+    if (!as->host_pages[i]) {
+        as->host_npages[i] = 0;
+        return;
+    }
+    for (u32 p = 0; p < as->host_npages[i]; p++) {
+        if (as->host_pages[i][p]) kfree(as->host_pages[i][p]);
+        as->host_pages[i][p] = NULL;
+    }
+    kfree(as->host_pages[i]);
+    as->host_pages[i] = NULL;
+    as->host_npages[i] = 0;
+}
+
 void vmm_init(phys_t kphys, u64 ksize)
 {
     (void)kphys;
     (void)ksize;
     memset(&g_kernel_as, 0, sizeof(g_kernel_as));
     spin_init(&g_kernel_as.lock, "kas", LOCK_RANK_VMM);
-    kprintf("vmm: host aspace (VAD probe, demand-zero, no PTEs)\n");
+    kprintf("vmm: host aspace (VAD probe, per-page shadow, no PTEs)\n");
 }
 
 void vmm_aspace_init(aspace_t *as)
@@ -68,10 +83,8 @@ void vmm_aspace_init(aspace_t *as)
 
 void vmm_aspace_destroy(aspace_t *as)
 {
-    for (u32 i = 0; i < as->vad_count; i++) {
-        if (as->host_shadow[i]) kfree(as->host_shadow[i]);
-        as->host_shadow[i] = NULL;
-    }
+    for (u32 i = 0; i < as->vad_count; i++)
+        host_pages_free(as, i);
     memset(as, 0, sizeof(*as));
 }
 
@@ -570,10 +583,18 @@ static status_t vmm_populate_page(aspace_t *as, virt_t page, bool write)
     if (write && !(prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
         return STATUS_ACCESS_VIOLATION;
 #ifdef JASOS_HOST
-    if (!as->host_shadow[idx]) {
-        u64 sz = as->vads[idx].end - as->vads[idx].start;
-        as->host_shadow[idx] = kalloc_zero(sz);
-        if (!as->host_shadow[idx]) return STATUS_NO_MEMORY;
+    u32 np = (u32)((as->vads[idx].end - as->vads[idx].start) / PAGE_SIZE);
+    if (np == 0) return STATUS_ACCESS_VIOLATION;
+    if (!as->host_pages[idx]) {
+        as->host_npages[idx] = np;
+        as->host_pages[idx] = kalloc_zero(np * sizeof(u8 *));
+        if (!as->host_pages[idx]) return STATUS_NO_MEMORY;
+    }
+    u32 pi = (u32)((page - as->vads[idx].start) / PAGE_SIZE);
+    if (pi >= as->host_npages[idx]) return STATUS_ACCESS_VIOLATION;
+    if (!as->host_pages[idx][pi]) {
+        as->host_pages[idx][pi] = kalloc_zero(PAGE_SIZE);
+        if (!as->host_pages[idx][pi]) return STATUS_NO_MEMORY;
     }
     return STATUS_SUCCESS;
 #else
@@ -639,7 +660,8 @@ status_t vmm_alloc_user(process_t *p, virt_t *base, u64 size, u32 prot, u32 type
     v->type = type;
     v->committed = 1;
 #ifdef JASOS_HOST
-    as->host_shadow[idx] = NULL;
+    as->host_pages[idx] = NULL;
+    as->host_npages[idx] = (u32)pages;
 #endif
     as->vad_count++;
     as->committed_pages += pages;
@@ -672,9 +694,11 @@ status_t vmm_free_user(process_t *p, virt_t base, u64 size)
             u64 pages = (as->vads[i].end - as->vads[i].start) / PAGE_SIZE;
             vmm_unmap(as, as->vads[i].start, pages);
 #ifdef JASOS_HOST
-            kfree(as->host_shadow[i]);
-            as->host_shadow[i] = as->host_shadow[as->vad_count - 1];
-            as->host_shadow[as->vad_count - 1] = NULL;
+            host_pages_free(as, i);
+            as->host_pages[i] = as->host_pages[as->vad_count - 1];
+            as->host_npages[i] = as->host_npages[as->vad_count - 1];
+            as->host_pages[as->vad_count - 1] = NULL;
+            as->host_npages[as->vad_count - 1] = 0;
 #endif
             if (as->committed_pages >= pages)
                 as->committed_pages -= pages;
@@ -693,19 +717,17 @@ status_t vmm_write_aspace(aspace_t *as, virt_t va, const void *src, u64 n)
     const u8 *s = src;
 #ifdef JASOS_HOST
     while (n) {
-        status_t st = vmm_populate_page(as, PAGE_ALIGN_DOWN(va), false);
+        virt_t page = PAGE_ALIGN_DOWN(va);
+        status_t st = vmm_populate_page(as, page, false);
         if (!NT_SUCCESS(st)) return st;
-        u32 hit = (u32)-1;
-        for (u32 i = 0; i < as->vad_count; i++) {
-            if (va >= as->vads[i].start && va < as->vads[i].end) {
-                hit = i;
-                break;
-            }
-        }
-        if (hit == (u32)-1 || !as->host_shadow[hit]) return STATUS_ACCESS_VIOLATION;
-        u64 off = va - as->vads[hit].start;
-        u64 chunk = MIN(n, as->vads[hit].end - va);
-        memcpy(as->host_shadow[hit] + off, s, (size_t)chunk);
+        int idx = vad_lookup(as, page);
+        if (idx < 0) return STATUS_ACCESS_VIOLATION;
+        u32 pi = (u32)((page - as->vads[idx].start) / PAGE_SIZE);
+        if (!as->host_pages[idx] || pi >= as->host_npages[idx] || !as->host_pages[idx][pi])
+            return STATUS_ACCESS_VIOLATION;
+        u64 off = va & PAGE_MASK;
+        u64 chunk = MIN(n, PAGE_SIZE - off);
+        memcpy(as->host_pages[idx][pi] + off, s, (size_t)chunk);
         va += chunk;
         s += chunk;
         n -= chunk;
@@ -735,19 +757,17 @@ status_t vmm_read_aspace(aspace_t *as, void *dst, virt_t va, u64 n)
     u8 *d = dst;
 #ifdef JASOS_HOST
     while (n) {
-        status_t st = vmm_populate_page(as, PAGE_ALIGN_DOWN(va), false);
+        virt_t page = PAGE_ALIGN_DOWN(va);
+        status_t st = vmm_populate_page(as, page, false);
         if (!NT_SUCCESS(st)) return st;
-        u32 hit = (u32)-1;
-        for (u32 i = 0; i < as->vad_count; i++) {
-            if (va >= as->vads[i].start && va < as->vads[i].end) {
-                hit = i;
-                break;
-            }
-        }
-        if (hit == (u32)-1 || !as->host_shadow[hit]) return STATUS_ACCESS_VIOLATION;
-        u64 off = va - as->vads[hit].start;
-        u64 chunk = MIN(n, as->vads[hit].end - va);
-        memcpy(d, as->host_shadow[hit] + off, (size_t)chunk);
+        int idx = vad_lookup(as, page);
+        if (idx < 0) return STATUS_ACCESS_VIOLATION;
+        u32 pi = (u32)((page - as->vads[idx].start) / PAGE_SIZE);
+        if (!as->host_pages[idx] || pi >= as->host_npages[idx] || !as->host_pages[idx][pi])
+            return STATUS_ACCESS_VIOLATION;
+        u64 off = va & PAGE_MASK;
+        u64 chunk = MIN(n, PAGE_SIZE - off);
+        memcpy(d, as->host_pages[idx][pi] + off, (size_t)chunk);
         va += chunk;
         d += chunk;
         n -= chunk;

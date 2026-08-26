@@ -97,6 +97,11 @@ fail, the kernel is not "probably fine".
 `NtQueryVirtualMemory`, `NtWaitForMultipleObjects` WAIT_ANY, and pipe
 last-writer EOF.
 
+0.12 selftest also covers wait-on-thread/process, abandoned mutex,
+priority inheritance, `NtTerminateThread` by handle, handle inherit,
+and per-page host shadow (1 MiB VAD + 1 byte write).
+
+
 ```
 ./build/jasos-host
 ./build/jasos-host --selftest

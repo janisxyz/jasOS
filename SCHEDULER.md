@@ -133,4 +133,14 @@ kstack. WAIT_ALL is covered by host selftest (notification events).
 T9: `tss_map_ist` after `vmm_init` points IST1–4 at guarded stacks at
 `IST_STACK_BASE`. DF/NMI/MC/IRQ no longer land in `.bss`.
 
+T12: mutex wait-boost is real. `sched_boost` requeues a READY owner
+under SCHED (legal while holding DISP). Nested mutexes: one
+`saved_priority`, unwind only when `owned_mutexes` is empty. Thread
+death abandons every owned mutex before signaling the thread object.
+`NtTerminateThread` on another thread sets `kill_pending`; trampoline
+and switch-in call `sched_exit_thread`. Host: `sched_start` zeros
+idle's ucontext `valid` bit; last non-idle exit `longjmp`s from the
+dying kstack so we never `setcontext` a post-longjmp idle frame.
+
+
 

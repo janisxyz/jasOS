@@ -202,6 +202,24 @@ See [BUILD.md](BUILD.md).
 | T10 | IST `.bss` arrays deleted | Guarded `IST_STACK_BASE` is the only landing pad; cli until `tss_map_ist` |
 | T11 | `NtAllocateVirtualMemory` is demand-zero | Pre-backing every page made the PF handler dead and a mapping bomb hit PMM |
 | T11 | `vmm_probe_user` walks VADs, not `PTE_P` | copyin of a committed untouched page must populate, not AV |
+| T12 | Mutex owner death abandons waiters | A dead owner left waiters sleeping forever; owned-mutex list + `STATUS_ABANDONED` |
+| T12 | Waiter donates priority to mutex owner | `wait_boost` was a field that did nothing; `sched_boost` requeues READY |
+| T12 | `NtTerminateThread` by handle | Self-only was a lie; `kill_pending` on switch-in / trampoline |
+| T12 | Handle inherit on `NtCreateProcess` | `slot.inherit` existed and was always 0 |
+| T12 | Host shadow is per-page | Whole-VAD `kalloc` was a mapping bomb the commit cap did not stop on host |
+| T12 | `ht_destroy` drops HANDLE before `kfree` | Last-thread exit paniced "heap while holding 7" |
+
+---
+
+## T12 surface (0.12.0)
+
+- Mutex rundown: each thread has `owned_mutexes`. Acquire inserts, last-recursion release removes, thread death abandons and wakes with `STATUS_ABANDONED`.
+- Priority inheritance: a higher-priority mutex waiter calls `sched_boost` on the owner (DISP held, SCHED is legal). Boost unwinds when the owner holds no more mutexes.
+- Process and thread objects are waitable and are actually waited on in host selftest.
+- `NtTerminateThread` looks up `THREAD_TERMINATE`, sets `kill_pending`, unlinks waiters, exits on switch-in. Idle is not killable.
+- `NtCreateProcess` copies inherit-marked handles. `NtDuplicateObject` takes `DUPLICATE_CLOSE_SOURCE | SAME_ACCESS | INHERIT` and holds `PROCESS_DUP_HANDLE` refs until the copy finishes.
+- Host VAD shadow is a pointer array plus one 4 KiB page on first touch, not a whole-VAD slab.
+- Host dispatcher restart: `sched_start` rebuilds idle's ucontext; last non-idle exit `longjmp`s without `setcontext` of a stale idle frame.
 
 ---
 

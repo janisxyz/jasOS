@@ -221,6 +221,8 @@ void disp_wake_one(dispatcher_t *d, status_t st)
         m->recursion = 1;
         m->abandoned = (st == STATUS_ABANDONED);
         d->signal_state = 0;
+        if (wb->thread)
+            ke_mutex_own(m, wb->thread);
     }
     if (wb->thread && wb->thread->state == THR_WAITING) {
         /* sched_ready takes SCHED. Caller may hold DISP (rank 9).
@@ -269,9 +271,13 @@ status_t ob_create_mutex(const char *name, bool initial_owner, mutex_object_t **
     if (!o) return STATUS_NO_MEMORY;
     mutex_object_t *m = (mutex_object_t *)o;
     disp_init(&m->disp, DISP_MUTANT, initial_owner ? 0 : 1);
+    list_init(&m->owned_link);
     m->owner = initial_owner ? ke_current() : NULL;
     m->recursion = initial_owner ? 1 : 0;
+    m->abandoned = false;
     o->wait = &m->disp;
+    if (m->owner)
+        ke_mutex_own(m, m->owner);
     *out = m;
     return STATUS_SUCCESS;
 }

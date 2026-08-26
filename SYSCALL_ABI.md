@@ -137,6 +137,12 @@ Max copyin size v1: 1 MiB. Bigger is `STATUS_INVALID_PARAMETER`.
 `-1` as a process/thread handle means current. Real handles are
 `(generation << 16) | (index << 2)`, never all-ones.
 
+T12: `NtDuplicateObject` a3 is the out-handle pointer (syscall bounce),
+a4 access, a5 flags: `DUPLICATE_CLOSE_SOURCE` (1), `SAME_ACCESS` (2),
+`INHERIT` (4). Foreign src/dst process handles require
+`PROCESS_DUP_HANDLE` (0x40). `NtTerminateThread` a0 may be a real
+thread handle.
+
 ## Marshalling (T6)
 
 `syscall_dispatch` never hands a user pointer to an `Nt*` implementation
@@ -162,4 +168,10 @@ none.
 T6: handle encoding grew a generation field. Syscall numbers 30–36
 are live. User `NtCreateThread` a1 is a user RIP stored on the TCB,
 never called in kernel.
+
+T12: `NtTerminateThread` a0 may be a real thread handle (not only
+`-1`). `NtDuplicateObject` a5 is flags. `PROCESS_DUP_HANDLE` is
+required to duplicate into/out of another process.
+
+
 
