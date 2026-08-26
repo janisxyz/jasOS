@@ -107,5 +107,5 @@ status_t NtUnmapViewOfSection(handle_t proc, virt_t base)
         p = (process_t *)po;
         ob_dereference(po);
     }
-    return vmm_free_user(p, base, PAGE_SIZE);
+    return vmm_free_user(p, base, 0);
 }
