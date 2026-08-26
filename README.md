@@ -42,6 +42,9 @@ Clone it. `make`. `make run`. That is how you boot it.
 - 0.13: `NtProtectVirtualMemory` (whole-VAD, no W^X); `g_procs` table ref
 - 0.14: VAD split on protect/free, coalesce, size-0 release, WAIT_ALL
   owned mutex, NOACCESS frame restore
+- 0.15: unmap/free never `pmm_free` under VMM; `vmm_ensure_leaf` for
+  page tables; `/bin/echo` is ET_EXEC; `user_launch` writes argv[0]
+
 
 
 

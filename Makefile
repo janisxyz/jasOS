@@ -50,7 +50,6 @@ KERNEL_C = \
 	user/bin/sh.c \
 	user/bin/ls.c \
 	user/bin/cat.c \
-	user/bin/echo.c \
 	user/bin/ps.c \
 	user/bin/crash.c
 
@@ -89,7 +88,6 @@ HOST_C = \
 	user/bin/sh.c \
 	user/bin/ls.c \
 	user/bin/cat.c \
-	user/bin/echo.c \
 	user/bin/ps.c \
 	user/bin/crash.c \
 	host/main.c \
@@ -102,11 +100,11 @@ all: user host kernel
 build:
 	mkdir -p build build/obj build/initrd
 
-host: build build/hello_blob.h
+host: build user
 	$(HOSTCC) $(HOST_CFLAGS) -o build/jasos-host $(HOST_C)
 	./build/jasos-host --selftest
 
-kernel: build build/hello_blob.h
+kernel: build user
 	mkdir -p build/obj
 	@for f in $(KERNEL_C); do \
 	  echo "  CC  $$f"; \
@@ -128,23 +126,33 @@ user: build
 	$(CROSS)$(CC) $(USER_CFLAGS) -c user/crt0.S -o build/userobj/crt0.o
 	$(CROSS)$(CC) $(USER_CFLAGS) -c user/ntdll/ntdll.S -o build/userobj/ntdll.o
 	$(CROSS)$(CC) $(USER_CFLAGS) -c user/bin/hello.c -o build/userobj/hello.o
+	$(CROSS)$(CC) $(USER_CFLAGS) -c user/bin/echo.c -o build/userobj/echo.o
 	$(CROSS)$(CC) $(USER_CFLAGS) -c user/libc/printf.c -o build/userobj/printf.o
 	$(CROSS)$(CC) $(USER_CFLAGS) -c user/libc/malloc.c -o build/userobj/malloc.o
 	$(CROSS)$(CC) $(USER_CFLAGS) -c kernel/lib/string.c -o build/userobj/string.o
 	$(CROSS)$(LD) -nostdlib -T user/linker.ld -o build/initrd/hello \
 	  build/userobj/crt0.o build/userobj/ntdll.o build/userobj/hello.o \
 	  build/userobj/printf.o build/userobj/malloc.o build/userobj/string.o
+	$(CROSS)$(LD) -nostdlib -T user/linker.ld -o build/initrd/echo \
+	  build/userobj/crt0.o build/userobj/ntdll.o build/userobj/echo.o \
+	  build/userobj/printf.o build/userobj/malloc.o build/userobj/string.o
 	python3 scripts/embed_elf.py build/initrd/hello build/hello_blob.h hello_elf_blob
-	@echo "user: build/initrd/hello"
-	@ls -l build/initrd/hello
-	@file build/initrd/hello || true
+	python3 scripts/embed_elf.py build/initrd/echo build/echo_blob.h echo_elf_blob
+	@echo "user: build/initrd/hello build/initrd/echo"
+	@ls -l build/initrd/hello build/initrd/echo
+	@file build/initrd/hello build/initrd/echo || true
 
-build/hello_blob.h:
+build/hello_blob.h build/echo_blob.h:
 	mkdir -p build
 	@if [ ! -f build/hello_blob.h ]; then \
 	  printf '%s\n' '/* stub until make user */' \
 	    'static const unsigned char hello_elf_blob[] = {0};' \
 	    'static const unsigned int hello_elf_blob_len = 0;' > build/hello_blob.h; \
+	fi
+	@if [ ! -f build/echo_blob.h ]; then \
+	  printf '%s\n' '/* stub until make user */' \
+	    'static const unsigned char echo_elf_blob[] = {0};' \
+	    'static const unsigned int echo_elf_blob_len = 0;' > build/echo_blob.h; \
 	fi
 
 run: kernel

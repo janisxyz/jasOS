@@ -105,6 +105,9 @@ and per-page host shadow (1 MiB VAD + 1 byte write).
 free), coalesce after restore, size-0 whole-VAD free, and WAIT_ALL
 on a mutex the caller already owns.
 
+0.15 selftest also covers `/bin/echo` as ELF (not a kernel builtin),
+32-page populated free + hole realloc, and size-0 release after that.
+
 
 ```
 ./build/jasos-host

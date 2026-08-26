@@ -12,6 +12,10 @@
 #    include "hello_blob.h"
 #    define HAVE_HELLO_BLOB 1
 #  endif
+#  if __has_include("echo_blob.h")
+#    include "echo_blob.h"
+#    define HAVE_ECHO_BLOB 1
+#  endif
 #endif
 
 static vnode_t    *g_root_vnode;
@@ -429,7 +433,6 @@ status_t vfs_seed_initrd(void)
     seed_file("/bin/sh", "BUILTIN\n");
     seed_file("/bin/ls", "BUILTIN\n");
     seed_file("/bin/cat", "BUILTIN\n");
-    seed_file("/bin/echo", "BUILTIN\n");
     seed_file("/bin/ps", "BUILTIN\n");
     seed_file("/bin/crash", "BUILTIN\n");
     {
@@ -442,6 +445,16 @@ status_t vfs_seed_initrd(void)
             u8 mini[128];
             u64 n = elf_make_minimal_hello(mini, sizeof(mini));
             if (n) vfs_write_bytes("/bin/hello", mini, n);
+        }
+    }
+    {
+#ifdef HAVE_ECHO_BLOB
+        if (echo_elf_blob_len > 64)
+            vfs_write_bytes("/bin/echo", echo_elf_blob, echo_elf_blob_len);
+        else
+#endif
+        {
+            seed_file("/bin/echo", "MISSING_ELF\n");
         }
     }
     kprintf("vfs: initrd /bin /etc /tmp /proc /dev\n");

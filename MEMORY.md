@@ -199,6 +199,17 @@ coalesce so a split-then-restore is one region again. Hardware
 Residual: a range that spans two VADs with a hole, or mixed prot,
 is `CONFLICTING_ADDRESSES`. Unmap still holds VMM across `pmm_free`.
 
+T15: `vmm_unmap` and `vmm_free_user` collect leaf PAs (and NOACCESS
+parked frames) under VMM, drop, then `pmm_free`. Large unmaps kalloc
+the list first (HEAP then VMM is legal). `vmm_map` / populate use
+`vmm_ensure_leaf`: `pt_alloc` with no VMM held, then a brief lock to
+install one missing table. `vmm_aspace_destroy` snapshots VADs,
+unmaps, then walks user PML4[0..255] to free leftover tables.
+Residual: OOM on a >16-page free falls back to 16-page batches;
+a populate of an already-cleared page in that window leaks one frame.
+`walk_alloc(create=true)` remains for `vmm_init` only (no VMM lock).
+
+
 
 
 

@@ -214,6 +214,20 @@ See [BUILD.md](BUILD.md).
 | T14 | Coalesce after protect | Restore-middle left three RW VADs; the original range could not be named |
 | T14 | WAIT_ALL owned mutex | `signal_state` is 0 while held; poll WAIT_ALL timed out on a mutex the caller owned |
 | T14 | NOACCESS frame restore | T13 parked the frame in a proto PTE then leaked it on the next RW protect |
+| T15 | Unmap never holds VMM across PMM | `pmm_free` under VMM panics rank 2-while-4; collect frames, drop, free |
+| T15 | `vmm_map` / populate `pt_alloc` off VMM | `walk_alloc(create)` took PMM while holding VMM; `vmm_ensure_leaf` fills one table at a time |
+| T15 | `/bin/echo` is ET_EXEC | echo.c unlinked from kernel.elf; sh keeps a builtin echo; spawn path is ring 3 |
+
+---
+
+## T15 surface (0.15.0)
+
+- `vmm_unmap` / `vmm_free_user` collect leaf PAs under VMM, drop the lock, then `pmm_free`. `vmm_map` and demand-zero populate allocate page tables with `vmm_ensure_leaf` (PMM then a brief VMM to install).
+- `vmm_aspace_destroy` snapshots VADs, unmaps rank-safe, then `free_user_tables` on the user half of CR3.
+- `/bin/echo` is a real ET_EXEC at 0x400000 (ntdll + libc), seeded from `echo_elf_blob`. Not in `g_builtins`. `user_launch` writes `argc=1` / `argv[0]=image` onto the user stack.
+- Residual: extra argv operands are not a syscall argument yet (T16). OOM during a >16-page free batches 16 frames and can leak one populate in the window. sh/ls/cat/ps/crash/init remain kernel-linked.
+
+Residual: protect still will not walk a run of mixed-prot VADs in one call; coalesce is same-prot adjacent only.
 
 ---
 
@@ -225,7 +239,7 @@ See [BUILD.md](BUILD.md).
 - Hardware `apply_prot_range` restores a NOACCESS'd frame (`pa != 0`, `PTE_P` clear) instead of leaking it on the next populate.
 - WAIT_ALL: a mutex the caller already owns counts as satisfied.
 
-Residual: protect still will not walk a run of mixed-prot VADs in one call; coalesce is same-prot adjacent only. Unmap still takes PMM while holding VMM.
+Residual (T14): protect still will not walk a run of mixed-prot VADs in one call; coalesce is same-prot adjacent only. Unmap-under-VMM closed in T15.
 
 ---
 

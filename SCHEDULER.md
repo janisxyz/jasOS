@@ -148,5 +148,11 @@ A timeout-0 WAIT_ALL on (owned mutex, signaled event) is SUCCESS,
 not TIMEOUT. Consume still goes through `ke_wait_object` and bumps
 mutex recursion — two `NtReleaseMutex` to fully drop.
 
+T15: last-thread exit still `vmm_aspace_destroy` then `ht_destroy`.
+Destroy snapshots VADs, unmaps rank-safe (no PMM under VMM), then
+frees user page tables. `user_launch` (hardware) writes argc/argv[0]
+before `enter_user`; extra operands are T16.
+
+
 
 

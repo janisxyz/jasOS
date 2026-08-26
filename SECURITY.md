@@ -54,12 +54,15 @@ closed vs residual.
 | `vmm_free_user` ignored size | a 1-page free of an 8-page VAD no longer nukes the rest |
 | NOACCESS then RW leaked the frame | `apply_prot_range` restores `pa` when `PTE_P` is clear |
 | WAIT_ALL poll on owned mutex | `disp_satisfied` counts owner==self even when `signal_state==0` |
+| Unmap `pmm_free` under VMM | collect PAs, drop VMM, then `pmm_free` (T15) |
+| `vmm_map` `pt_alloc` under VMM | `vmm_ensure_leaf` allocates the table first |
+| `/bin/echo` kernel-linked | unlinked; ET_EXEC + ntdll; sh builtin echo remains ring 0 |
 
 ## Residual (honest)
 
 | Residual | Why it still exists | Mitigation |
 |---|---|---|
-| Kernel-linked userland | init/sh/ls/cat/echo/ps/crash are still linked into kernel.elf so the box has a shell the day it boots | Treat sh as ring 0. `/bin/hello` is the ring-3 path. |
+| Kernel-linked userland | init/sh/ls/cat/ps/crash are still linked into kernel.elf so the box has a shell the day it boots | Treat sh as ring 0. `/bin/hello` and `/bin/echo` are the ring-3 path. |
 | No KASLR | kernel at `0xFFFFFFFF80000000` | Fine until a UEFI stub with entropy |
 | No XSAVE | FXSAVE is 512 bytes; AVX is not covered | Do not set `CR4.OSXSAVE` |
 | VAD array 64 | a mapping bomb fails closed with `INSUFFICIENT_RESOURCES` | fail closed is the mitigation; commit cap is the other |
@@ -70,7 +73,8 @@ closed vs residual.
 | virtio-blk virtqueues | identify-only; I/O is Ramdisk0 | do not print "virtio I/O up" |
 | PIC not LAPIC | 8259 is v1; MADT/x2APIC is the next HAL | dmesg says 8259, never LAPIC |
 | Protect spans mixed VADs | one containing VAD only; coalesce is same-prot adjacent | fail closed `CONFLICTING_ADDRESSES` |
-| Unmap holds VMM across PMM | hole-steal if we drop the lock first | unmap under lock; rank inversion is residual |
+| OOM unmap batch leak | >16-page free with kalloc fail batches 16; populate can refill a cleared page | fail closed is rare; commit cap keeps n_pages bounded |
+| NtCreateProcess has no argv | `user_launch` writes argc=1 / argv[0]=image only | extra operands are T16 |
 
 
 ## Panic path contract

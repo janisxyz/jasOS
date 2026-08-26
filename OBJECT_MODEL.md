@@ -192,4 +192,10 @@ the table lock before `close_fn` / `ob_dereference` (HEAP is rank 3).
 Process and thread dispatcher objects are signaled on the way to
 TERMINATED; host selftest waits on both.
 
+T15: `/bin/echo` is no longer a Process-spawned kernel builtin. The
+object is still a Process; the image is an ELF section map like
+`/bin/hello`. sh's `echo` command remains a ring-0 builtin (standard
+shell). Token is still a Process field, not an object.
+
+
 

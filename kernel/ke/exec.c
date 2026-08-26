@@ -18,7 +18,6 @@
 extern int sh_main(int argc, char **argv);
 extern int ls_main(int argc, char **argv);
 extern int cat_main(int argc, char **argv);
-extern int echo_main(int argc, char **argv);
 extern int ps_main(int argc, char **argv);
 extern int crash_main(int argc, char **argv);
 
@@ -31,7 +30,6 @@ static const builtin_t g_builtins[] = {
     { "/bin/sh",    sh_main },
     { "/bin/ls",    ls_main },
     { "/bin/cat",   cat_main },
-    { "/bin/echo",  echo_main },
     { "/bin/ps",    ps_main },
     { "/bin/crash", crash_main },
 };
@@ -73,6 +71,32 @@ static void elf_host_stub(void *arg)
 #endif
 
 #ifndef JASOS_HOST
+/*
+ * T16 start: write the initial user stack. Today argc=1, argv[0]=image.
+ * Extra operands need a syscall argv vector — NtCreateProcess has none.
+ */
+static virt_t psp_write_initial_stack(process_t *p)
+{
+    virt_t sp = p->user_stack;
+    u64 nlen = 0;
+    while (p->image[nlen]) nlen++;
+    nlen++;
+    sp -= (nlen + 15u) & ~15u;
+    vmm_write_aspace(&p->aspace, sp, p->image, nlen);
+    virt_t arg0 = sp;
+    u64 z = 0;
+    u64 argc = 1;
+    sp -= 8;
+    vmm_write_aspace(&p->aspace, sp, &z, 8);
+    sp -= 8;
+    vmm_write_aspace(&p->aspace, sp, &z, 8);
+    sp -= 8;
+    vmm_write_aspace(&p->aspace, sp, &arg0, 8);
+    sp -= 8;
+    vmm_write_aspace(&p->aspace, sp, &argc, 8);
+    return sp;
+}
+
 static void user_launch(void *arg)
 {
     (void)arg;
@@ -81,15 +105,7 @@ static void user_launch(void *arg)
         NtTerminateProcess(HANDLE_CURRENT, STATUS_INVALID_IMAGE_FORMAT);
         return;
     }
-    virt_t sp = p->user_stack;
-    u64 z = 0;
-    /* argc = 0, argv terminator, env terminator. crt0 pops argc. */
-    sp -= 8;
-    vmm_write_aspace(&p->aspace, sp, &z, 8);
-    sp -= 8;
-    vmm_write_aspace(&p->aspace, sp, &z, 8);
-    sp -= 8;
-    vmm_write_aspace(&p->aspace, sp, &z, 8);
+    virt_t sp = psp_write_initial_stack(p);
     enter_user(p->user_entry, sp, 0x202);
 }
 

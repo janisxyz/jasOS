@@ -24,12 +24,14 @@
  *    hole between them is CONFLICTING. Coalesce only joins adjacent
  *    same-prot VADs after protect; it does not walk a range of mixed
  *    VADs in one syscall.
+ *  - T15: unmap/free collect frames under VMM then pmm_free after drop.
+ *    OOM during a >16-page free falls back to 16-page batches; a
+ *    populate of an already-cleared page in that window leaks one frame.
  */
 
 static aspace_t g_kernel_as;
 
 #ifndef JASOS_HOST
-static void unmap_range_locked(aspace_t *as, virt_t va, u64 n_pages);
 static void apply_prot_range(aspace_t *as, virt_t base, u64 size, u32 prot);
 #endif
 
@@ -316,36 +318,115 @@ static phys_t pt_alloc(void)
     return p;
 }
 
+#define PTE_ADDR     0x000FFFFFFFFFF000ULL
+#define UNMAP_BATCH  16u
+
 static u64 *walk_alloc(phys_t cr3, virt_t va, bool create)
 {
     u64 *pml4 = map_window(cr3);
     u32 i4 = (va >> 39) & 0x1FF;
     u32 i3 = (va >> 30) & 0x1FF;
-    u32 i2 = (va >> 21) & 0x1FF;
     u32 i1 = (va >> 12) & 0x1FF;
+    u32 i2 = (va >> 21) & 0x1FF;
+    u64 u = (i4 < KERNEL_PML4_START) ? PTE_U : 0;
     if (!(pml4[i4] & PTE_P)) {
         if (!create) return NULL;
         phys_t n = pt_alloc();
         if (n == PMM_INVALID) return NULL;
-        pml4[i4] = n | PTE_P | PTE_W | (i4 < KERNEL_PML4_START ? PTE_U : 0);
+        pml4[i4] = n | PTE_P | PTE_W | u;
     }
-    u64 *pdpt = map_window(pml4[i4] & 0x000FFFFFFFFFF000ULL);
+    u64 *pdpt = map_window(pml4[i4] & PTE_ADDR);
     if (!(pdpt[i3] & PTE_P)) {
         if (!create) return NULL;
         phys_t n = pt_alloc();
         if (n == PMM_INVALID) return NULL;
-        pdpt[i3] = n | PTE_P | PTE_W | (i4 < KERNEL_PML4_START ? PTE_U : 0);
+        pdpt[i3] = n | PTE_P | PTE_W | u;
     }
-    u64 *pd = map_window(pdpt[i3] & 0x000FFFFFFFFFF000ULL);
+    u64 *pd = map_window(pdpt[i3] & PTE_ADDR);
     if (pd[i2] & PTE_PS) return NULL; /* 2M leaf */
     if (!(pd[i2] & PTE_P)) {
         if (!create) return NULL;
         phys_t n = pt_alloc();
         if (n == PMM_INVALID) return NULL;
-        pd[i2] = n | PTE_P | PTE_W | (i4 < KERNEL_PML4_START ? PTE_U : 0);
+        pd[i2] = n | PTE_P | PTE_W | u;
     }
-    u64 *pt = map_window(pd[i2] & 0x000FFFFFFFFFF000ULL);
+    u64 *pt = map_window(pd[i2] & PTE_ADDR);
     return &pt[i1];
+}
+
+/*
+ * Boot-only walker may pt_alloc (vmm_init holds no VMM lock).
+ * Post-boot map/populate must not: PMM is rank 2, VMM is 4.
+ * walk_fill_one installs one preallocated table at the first hole.
+ */
+static int walk_fill_one(phys_t cr3, virt_t va, phys_t n)
+{
+    u64 *pml4 = map_window(cr3);
+    u32 i4 = (va >> 39) & 0x1FF;
+    u32 i3 = (va >> 30) & 0x1FF;
+    u32 i2 = (va >> 21) & 0x1FF;
+    u64 u = (i4 < KERNEL_PML4_START) ? PTE_U : 0;
+    if (!(pml4[i4] & PTE_P)) {
+        pml4[i4] = n | PTE_P | PTE_W | u;
+        return 1;
+    }
+    u64 *pdpt = map_window(pml4[i4] & PTE_ADDR);
+    if (!(pdpt[i3] & PTE_P)) {
+        pdpt[i3] = n | PTE_P | PTE_W | u;
+        return 1;
+    }
+    u64 *pd = map_window(pdpt[i3] & PTE_ADDR);
+    if (pd[i2] & PTE_PS) return 0;
+    if (!(pd[i2] & PTE_P)) {
+        pd[i2] = n | PTE_P | PTE_W | u;
+        return 1;
+    }
+    return 0;
+}
+
+static void invlpg_if_current(aspace_t *as, virt_t page)
+{
+    u64 cur;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cur));
+    if (cur == as->cr3_phys)
+        __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
+}
+
+/* pt_alloc then brief VMM to install. Never pmm_alloc while holding VMM. */
+static status_t vmm_ensure_leaf(aspace_t *as, virt_t page)
+{
+    spin_lock(&as->lock);
+    u64 *pte = walk_alloc(as->cr3_phys, page, false);
+    spin_unlock(&as->lock);
+    if (pte) return STATUS_SUCCESS;
+    for (int t = 0; t < 16; t++) {
+        phys_t n = pt_alloc();
+        if (n == PMM_INVALID) return STATUS_NO_MEMORY;
+        spin_lock(&as->lock);
+        int used = walk_fill_one(as->cr3_phys, page, n);
+        pte = walk_alloc(as->cr3_phys, page, false);
+        spin_unlock(&as->lock);
+        if (!used) pmm_free(n, 0);
+        if (pte) return STATUS_SUCCESS;
+    }
+    return STATUS_NO_MEMORY;
+}
+
+static u64 collect_clear_locked(aspace_t *as, virt_t va, u64 n_pages,
+                                phys_t *out, u32 cap, u32 *nf)
+{
+    u64 n = n_pages < (u64)cap ? n_pages : (u64)cap;
+    for (u64 i = 0; i < n; i++) {
+        virt_t page = va + i * PAGE_SIZE;
+        u64 *pte = walk_alloc(as->cr3_phys, page, false);
+        if (!pte) continue;
+        phys_t pa = *pte & PTE_ADDR;
+        *pte = 0;
+        invlpg_if_current(as, page);
+        if (pa && *nf < cap)
+            out[(*nf)++] = pa;
+    }
+    return n;
 }
 
 /*
@@ -527,83 +608,59 @@ void vmm_aspace_init(aspace_t *as)
 
 status_t vmm_map(aspace_t *as, virt_t va, phys_t pa, u64 n_pages, u64 flags)
 {
-    spin_lock(&as->lock);
     for (u64 i = 0; i < n_pages; i++) {
         virt_t page = va + i * PAGE_SIZE;
-        u64 *pte = walk_alloc(as->cr3_phys, page, true);
+        status_t st = vmm_ensure_leaf(as, page);
+        if (!NT_SUCCESS(st)) return st;
+        spin_lock(&as->lock);
+        u64 *pte = walk_alloc(as->cr3_phys, page, false);
         if (!pte) {
             spin_unlock(&as->lock);
             return STATUS_NO_MEMORY;
         }
         *pte = (pa + i * PAGE_SIZE) | flags | PTE_P;
-        u64 cur_cr3;
-        __asm__ volatile("mov %%cr3, %0" : "=r"(cur_cr3));
-        if (cur_cr3 == as->cr3_phys)
-            __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
+        invlpg_if_current(as, page);
+        spin_unlock(&as->lock);
     }
-    spin_unlock(&as->lock);
     return STATUS_SUCCESS;
 }
 
 status_t vmm_unmap(aspace_t *as, virt_t va, u64 n_pages)
 {
-    /* T15 start: small unmaps collect frames, drop VMM, then pmm_free.
-       Rank inversion (VMM then PMM) remains for n_pages > 16 and for
-       vmm_free_user which must unmap under the lock to keep the hole. */
-    if (n_pages <= 16) {
-        phys_t frames[16];
+    /* T15: never pmm_free while holding VMM. kalloc the frame list
+       first (HEAP then VMM is legal). Chunked stack fallback if OOM. */
+    if (!as || n_pages == 0) return STATUS_SUCCESS;
+    phys_t stack[UNMAP_BATCH];
+    phys_t *fr = stack;
+    u32 cap = UNMAP_BATCH;
+    int heap = 0;
+    if (n_pages > UNMAP_BATCH) {
+        fr = kalloc(n_pages * sizeof(phys_t));
+        if (fr) {
+            cap = (u32)n_pages;
+            heap = 1;
+        } else {
+            fr = stack;
+        }
+    }
+    u64 done = 0;
+    while (done < n_pages) {
         u32 nf = 0;
         spin_lock(&as->lock);
-        for (u64 i = 0; i < n_pages; i++) {
-            virt_t page = va + i * PAGE_SIZE;
-            u64 *pte = walk_alloc(as->cr3_phys, page, false);
-            if (!pte) continue;
-            phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
-            *pte = 0;
-            if (pa)
-                frames[nf++] = pa;
-            u64 cur_cr3;
-            __asm__ volatile("mov %%cr3, %0" : "=r"(cur_cr3));
-            if (cur_cr3 == as->cr3_phys)
-                __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
+        if (!as->cr3_phys) {
+            spin_unlock(&as->lock);
+            break;
         }
+        u64 chunk = collect_clear_locked(as, va + done * PAGE_SIZE,
+                                         n_pages - done, fr, cap, &nf);
         spin_unlock(&as->lock);
         for (u32 i = 0; i < nf; i++)
-            pmm_free(frames[i], 0);
-        return STATUS_SUCCESS;
+            pmm_free(fr[i], 0);
+        if (chunk == 0) break;
+        done += chunk;
     }
-    spin_lock(&as->lock);
-    unmap_range_locked(as, va, n_pages);
-    spin_unlock(&as->lock);
+    if (heap) kfree(fr);
     return STATUS_SUCCESS;
-}
-
-/*
- * Clear PTEs and free frames. Caller holds as->lock.
- * Rank: pmm_free takes PMM while we hold VMM. Existing since T6.
- * Unmapping after dropping the lock lets NtAllocate steal the hole
- * and then we free the new frames. Residual: frame-list then drop.
- */
-static void unmap_range_locked(aspace_t *as, virt_t va, u64 n_pages)
-{
-    for (u64 i = 0; i < n_pages; i++) {
-        virt_t page = va + i * PAGE_SIZE;
-        u64 *pte = walk_alloc(as->cr3_phys, page, false);
-        if (pte && (*pte & PTE_P)) {
-            phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
-            *pte = 0;
-            pmm_free(pa, 0);
-            u64 cur_cr3;
-            __asm__ volatile("mov %%cr3, %0" : "=r"(cur_cr3));
-            if (cur_cr3 == as->cr3_phys)
-                __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
-        } else if (pte) {
-            phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
-            *pte = 0;
-            if (pa)
-                pmm_free(pa, 0); /* NOACCESS'd frame sitting in proto PTE */
-        }
-    }
 }
 
 /*
@@ -618,7 +675,7 @@ static void apply_prot_range(aspace_t *as, virt_t base, u64 size, u32 prot)
         virt_t page = base + off;
         u64 *pte = walk_alloc(as->cr3_phys, page, false);
         if (!pte) continue;
-        phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
+        phys_t pa = *pte & PTE_ADDR;
         if (prot & PAGE_NOACCESS) {
             if (*pte & PTE_P)
                 *pte = pa | PTE_SW_COMMIT | PTE_NX;
@@ -665,14 +722,29 @@ static void free_user_tables(phys_t table, int level)
 
 void vmm_aspace_destroy(aspace_t *as)
 {
-    if (!as->cr3_phys) return;
-    for (u32 i = 0; i < as->vad_count; i++) {
-        u64 pages = (as->vads[i].end - as->vads[i].start) / PAGE_SIZE;
-        vmm_unmap(as, as->vads[i].start, pages);
+    if (!as) return;
+    spin_lock(&as->lock);
+    if (!as->cr3_phys) {
+        spin_unlock(&as->lock);
+        return;
     }
+    vad_t snap[MAX_VADS];
+    u32 n = as->vad_count;
+    if (n > MAX_VADS) n = MAX_VADS;
+    for (u32 i = 0; i < n; i++)
+        snap[i] = as->vads[i];
     as->vad_count = 0;
-    free_user_tables(as->cr3_phys, 4);
+    as->committed_pages = 0;
+    phys_t cr3 = as->cr3_phys;
+    spin_unlock(&as->lock);
+    for (u32 i = 0; i < n; i++) {
+        u64 pages = (snap[i].end - snap[i].start) / PAGE_SIZE;
+        vmm_unmap(as, snap[i].start, pages);
+    }
+    spin_lock(&as->lock);
     as->cr3_phys = 0;
+    spin_unlock(&as->lock);
+    free_user_tables(cr3, 4);
 }
 
 bool vmm_probe_user(aspace_t *as, virt_t va, u64 n, bool write)
@@ -797,11 +869,51 @@ static status_t vmm_populate_page(aspace_t *as, virt_t page, bool write)
     }
     phys_t pa = pmm_alloc(0, PMM_USER | PMM_ZERO);
     if (pa == PMM_INVALID) return STATUS_NO_MEMORY;
-    status_t st = vmm_map(as, page, pa, 1, pte_flags_from_prot(prot));
+    status_t st = vmm_ensure_leaf(as, page);
     if (!NT_SUCCESS(st)) {
         pmm_free(pa, 0);
         return st;
     }
+    spin_lock(&as->lock);
+    idx = vad_lookup(as, page);
+    if (idx < 0) {
+        spin_unlock(&as->lock);
+        pmm_free(pa, 0);
+        return STATUS_ACCESS_VIOLATION;
+    }
+    prot = as->vads[idx].prot;
+    if (prot & PAGE_NOACCESS) {
+        spin_unlock(&as->lock);
+        pmm_free(pa, 0);
+        return STATUS_ACCESS_VIOLATION;
+    }
+    if (write && !(prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE))) {
+        spin_unlock(&as->lock);
+        pmm_free(pa, 0);
+        return STATUS_ACCESS_VIOLATION;
+    }
+    pte = walk_alloc(as->cr3_phys, page, false);
+    if (pte && (*pte & PTE_P)) {
+        spin_unlock(&as->lock);
+        pmm_free(pa, 0);
+        return STATUS_SUCCESS;
+    }
+    if (!pte) {
+        spin_unlock(&as->lock);
+        pmm_free(pa, 0);
+        return STATUS_NO_MEMORY;
+    }
+    phys_t parked = *pte & PTE_ADDR;
+    if (parked) {
+        *pte = parked | pte_flags_from_prot(prot);
+        invlpg_if_current(as, page);
+        spin_unlock(&as->lock);
+        pmm_free(pa, 0);
+        return STATUS_SUCCESS;
+    }
+    *pte = pa | pte_flags_from_prot(prot);
+    invlpg_if_current(as, page);
+    spin_unlock(&as->lock);
     return STATUS_SUCCESS;
 #endif
 }
@@ -863,12 +975,22 @@ status_t vmm_alloc_user(process_t *p, virt_t *base, u64 size, u32 prot, u32 type
 
 #ifndef JASOS_HOST
     for (u64 i = 0; i < pages; i++) {
-        u64 *pte = walk_alloc(as->cr3_phys, va + i * PAGE_SIZE, true);
-        if (!pte) {
+        virt_t page = va + i * PAGE_SIZE;
+        status_t pst = vmm_ensure_leaf(as, page);
+        if (!NT_SUCCESS(pst)) {
             vmm_free_user(p, va, size);
             return STATUS_NO_MEMORY;
         }
-        *pte = PTE_SW_COMMIT;
+        spin_lock(&as->lock);
+        u64 *pte = walk_alloc(as->cr3_phys, page, false);
+        if (!pte) {
+            spin_unlock(&as->lock);
+            vmm_free_user(p, va, size);
+            return STATUS_NO_MEMORY;
+        }
+        if (!(*pte & PTE_P) && !(*pte & PTE_ADDR))
+            *pte = PTE_SW_COMMIT;
+        spin_unlock(&as->lock);
     }
 #endif
     *base = va;
@@ -892,6 +1014,10 @@ status_t vmm_free_user(process_t *p, virt_t base, u64 size)
     u8 **arr_left = NULL, **arr_right = NULL;
     u8 **drop_arr = NULL;
     u32 drop_lo = 0, drop_hi = 0;
+#endif
+#ifndef JASOS_HOST
+    phys_t *fr_heap = NULL;
+    phys_t fr_stack[UNMAP_BATCH];
 #endif
 
     spin_lock(&as->lock);
@@ -943,6 +1069,35 @@ status_t vmm_free_user(process_t *p, virt_t base, u64 size)
         spin_unlock(&as->lock);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+
+#ifndef JASOS_HOST
+    if (n_mid > UNMAP_BATCH) {
+        spin_unlock(&as->lock);
+        fr_heap = kalloc(n_mid * sizeof(phys_t));
+        spin_lock(&as->lock);
+        if (size == 0) {
+            idx = -1;
+            for (u32 i = 0; i < as->vad_count; i++) {
+                if (as->vads[i].start == base) { idx = (int)i; break; }
+            }
+        } else {
+            idx = vad_contains_range(as, base, end);
+        }
+        if (idx < 0 || as->vads[idx].start != a || as->vads[idx].end != d) {
+            spin_unlock(&as->lock);
+            kfree(fr_heap);
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
+        if (as->vad_count + extra > MAX_VADS) {
+            spin_unlock(&as->lock);
+            kfree(fr_heap);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        typ = as->vads[idx].type;
+        com = as->vads[idx].committed;
+        old_prot = as->vads[idx].prot;
+    }
+#endif
 
 #ifdef JASOS_HOST
     int populated = as->host_pages[idx] != NULL;
@@ -1004,6 +1159,34 @@ status_t vmm_free_user(process_t *p, virt_t base, u64 size)
     (void)old_prot;
 #endif
 
+#ifndef JASOS_HOST
+    /* Collect frames while the VAD still covers the range so a
+       concurrent NtAllocate is CONFLICTING, not a hole-steal. */
+    phys_t *fr = fr_heap ? fr_heap : fr_stack;
+    u32 fr_cap = fr_heap ? n_mid : UNMAP_BATCH;
+    u32 nf = 0;
+    u32 collected = 0;
+    while (collected < n_mid) {
+        u32 more = 0;
+        u64 chunk = collect_clear_locked(as, base + (u64)collected * PAGE_SIZE,
+                                         n_mid - collected, fr + nf,
+                                         fr_cap - nf, &more);
+        nf += more;
+        collected += (u32)chunk;
+        if (chunk == 0) break;
+        if (!fr_heap && collected < n_mid) {
+            /* OOM fallback: drop, free this batch, relock. VAD still
+               present so NtAllocate cannot steal. Populate of an
+               already-cleared page leaks one frame — residual on OOM. */
+            spin_unlock(&as->lock);
+            for (u32 i = 0; i < nf; i++)
+                pmm_free(fr[i], 0);
+            nf = 0;
+            spin_lock(&as->lock);
+        }
+    }
+#endif
+
     if (n_left && n_right) {
         as->vads[idx].start = a;
         as->vads[idx].end = base;
@@ -1046,13 +1229,19 @@ status_t vmm_free_user(process_t *p, virt_t base, u64 size)
     }
 
 #ifndef JASOS_HOST
-    unmap_range_locked(as, base, n_mid);
+    /* PTEs already cleared. Rank-safe: pmm_free after VMM drop. */
 #endif
     if (as->committed_pages >= n_mid)
         as->committed_pages -= n_mid;
     else
         as->committed_pages = 0;
     spin_unlock(&as->lock);
+
+#ifndef JASOS_HOST
+    for (u32 i = 0; i < nf; i++)
+        pmm_free(fr[i], 0);
+    kfree(fr_heap);
+#endif
 
 #ifdef JASOS_HOST
     if (drop_arr) {

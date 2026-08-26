@@ -183,6 +183,12 @@ is `CONFLICTING_ADDRESSES`. `NtFreeVirtualMemory` honours `size`;
 `size == 0` releases the whole VAD at `base` (NT `MEM_RELEASE`).
 `NtUnmapViewOfSection` passes size 0.
 
+T15: `NtFreeVirtualMemory` / unmap collect frames then `pmm_free` after
+dropping VMM. `/bin/echo` is ET_EXEC; `NtCreateProcess("/bin/echo")` is
+the ring-3 path. `user_launch` writes `argc=1`, `argv[0]=image`. Extra
+operands are T16 — the syscall still has no argv vector.
+
+
 
 
 

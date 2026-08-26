@@ -262,7 +262,7 @@ int selftest_run(void)
 
     handle_t child = 0;
     st = NtCreateProcess(&child, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED);
-    EXPECT(NT_SUCCESS(st) && child, "NtCreateProcess suspended builtin");
+    EXPECT(NT_SUCCESS(st) && child, "NtCreateProcess suspended echo");
     NtClose(child);
 
     g_ping = g_pong = 0;
@@ -862,6 +862,63 @@ int selftest_run(void)
         st = vmm_free_user(pp, hole, 0);
         EXPECT(NT_SUCCESS(st), "size 0 hole realloc");
 
+        ob_dereference(o);
+        NtClose(ph);
+    }
+
+    /* T15: /bin/echo is an ET_EXEC, not a kernel builtin. */
+    {
+        EXPECT(!builtin_lookup("/bin/echo", NULL), "echo not a kernel builtin");
+        EXPECT(builtin_lookup("/bin/sh", NULL), "sh still a kernel builtin");
+        u8 *bytes = NULL;
+        u64 len = 0;
+        st = vfs_read_all("/bin/echo", &bytes, &len);
+        EXPECT(NT_SUCCESS(st) && bytes && len > 64, "echo vfs blob");
+        EXPECT(bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' &&
+               bytes[3] == 'F', "echo is ELF");
+        kfree(bytes);
+        handle_t eh = 0;
+        st = NtCreateProcess(&eh, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st) && eh, "echo process");
+        object_t *eo = NULL;
+        st = ht_lookup(&psp_system_process()->handles, eh, 0, OBJ_PROCESS, &eo);
+        EXPECT(NT_SUCCESS(st) && eo, "echo process lookup");
+        process_t *ep = (process_t *)eo;
+        EXPECT(ep->user_mode, "echo is user_mode");
+        EXPECT(ep->aspace.vad_count >= 1, "echo has image VAD");
+        ob_dereference(eo);
+        NtClose(eh);
+    }
+
+    /* T15: free of a populated 32-page VAD returns the VA hole. */
+    {
+        handle_t ph = 0;
+        st = NtCreateProcess(&ph, PROCESS_ALL_ACCESS, "/bin/hello", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st), "t15 proc");
+        object_t *o = NULL;
+        st = ht_lookup(&psp_system_process()->handles, ph, 0, OBJ_PROCESS, &o);
+        EXPECT(NT_SUCCESS(st) && o, "t15 proc lookup");
+        process_t *pp = (process_t *)o;
+        virt_t big = 0x0000000006000000ULL;
+        st = vmm_alloc_user(pp, &big, 32u * PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+        EXPECT(NT_SUCCESS(st), "t15 32-page alloc");
+        u32 filled = 0;
+        for (u32 i = 0; i < 32; i++) {
+            char c = (char)i;
+            if (NT_SUCCESS(vmm_write_aspace(&pp->aspace, big + (u64)i * PAGE_SIZE, &c, 1)))
+                filled++;
+        }
+        EXPECT(filled == 32, "t15 populate 32 pages");
+        st = vmm_free_user(pp, big, 32u * PAGE_SIZE);
+        EXPECT(NT_SUCCESS(st), "t15 32-page free");
+        int gone = 1;
+        for (u32 i = 0; i < pp->aspace.vad_count; i++)
+            if (pp->aspace.vads[i].start == big) gone = 0;
+        EXPECT(gone, "t15 VAD gone after free");
+        st = vmm_alloc_user(pp, &big, 32u * PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+        EXPECT(NT_SUCCESS(st) && big == 0x0000000006000000ULL, "t15 hole realloc");
+        st = vmm_free_user(pp, big, 0);
+        EXPECT(NT_SUCCESS(st), "t15 size-0 release");
         ob_dereference(o);
         NtClose(ph);
     }
