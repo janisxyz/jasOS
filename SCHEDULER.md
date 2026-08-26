@@ -1,0 +1,112 @@
+# Scheduler
+
+## Shape
+
+UP, 32 priority levels (0 idle … 31 realtime), round-robin within a
+level, 100 Hz quantum. Preemptive. Not the Linux CFS. Not a real-time
+OS. A Windows engineer should see "dispatcher database" and nod.
+
+## Why PIT, not LAPIC, in v1
+
+PIT channel 0 + PIC IRQ0 is present on every QEMU/q35 we care about
+and does not require MADT, MSR `APIC_BASE`, or an x2APIC enable
+sequence. We already have to remap the PIC for exceptions-vs-IRQs.
+The 100 Hz tick is the clock interrupt; `ke_tick` is the one function
+that may set `need_resched`.
+
+LAPIC timer replaces PIT in the HAL without touching `ke/sched.c`.
+Contract: `hal_timer_init(hz)` and `hal_timer_isr` call `ke_on_tick()`.
+
+## Thread states
+
+```
+UNUSED → READY ⇄ RUNNING → WAITING
+                 RUNNING → TERMINATED
+                 WAITING → READY
+```
+
+`TERMINATED` stays referenced until the last handle and the reaper
+drop it. The thread object is waitable and is signaled on the way to
+`TERMINATED`.
+
+## Quantum
+
+Default 3 ticks (30 ms at 100 Hz). Realtime (priority ≥ 24) is still
+preempted by higher realtime, but does not rotate on quantum end —
+it yields only on wait or `NtYieldExecution`. That is how a runaway
+realtime thread burns the box; it is also how a driver DPC-equivalent
+(we don't have DPCs as threads) would. v1 has no watchdog.
+
+Idle thread: priority 0, always ready, runs `hlt` with IF set.
+
+## Ready queues
+
+`ready[32]` doubly-linked. `ready_mask` is a 32-bit bitset so
+`highest = 31 - clz(ready_mask)`. Insertion: tail (RR). Preempt if
+the incoming priority is **strictly greater** than current.
+
+No priority inheritance in v1 except mutex wait-boost: waiter donates
+its priority to the mutex owner until release. Boost is stored on the
+thread (`saved_priority`) and unwound on `NtReleaseMutex`. Nested
+mutexes: one saved priority, the highest donation sticks. This is
+incomplete and documented; it is not a spinlock pretending to be a
+mutex.
+
+## Context switch (`ke/switch.S`)
+
+Callee-saved + `rip`/`rsp`/`rflags`:
+
+```
+r15 r14 r13 r12 rbx rbp
+rip rsp rflags
+```
+
+FXSAVE is **not** in v1. User threads that execute SSE will leak/clobber
+XMM. Residual, tracked: we zero XMM on thread create so at least we
+do not leak kernel SIMD. Preempted user SSE is wrong. Fix before any
+libc that uses SSE memcpy. `clang -mno-sse` for kernel; user is on
+its own until `fxsave` lands.
+
+Switch runs with IF off. The incoming thread restores `rflags` from
+its frame, which may enable IF.
+
+## Wait
+
+See [OBJECT_MODEL.md](OBJECT_MODEL.md). `KeWaitForSingleObject` is the
+only sleep. `KeDelayExecution` waits on a per-thread timer. There is
+no `sleep()` in the kernel that busy-waits more than 1 µs (port I/O
+spin on UART LSR is the exception, and it is capped).
+
+Timeouts are in 100 ns units (NT) but our tick is 10 ms, so the
+minimum real sleep is one tick. A 0 timeout is a poll.
+
+## Idle / start
+
+`sched_start` switches from the boot context into idle. Boot context
+is never returned to. Idle then picks init if it is ready (it is).
+
+## Failure modes
+
+| Mode | Result |
+|---|---|
+| No ready thread except idle | idle `hlt` |
+| Stack smash | DF on IST1, panic |
+| Wait with locks held | lock-rank assert in debug; in release we still wait and that is a deadlock — debug builds `panic` if IRQL > PASSIVE on wait |
+| Priority inversion (non-mutex) | accepted in v1 |
+| init (pid 1) exits | panic `"init died"` |
+
+## Lock ranking
+
+```
+6  scheduler   (dispatcher lock)
+7  wait object (per dispatcher header; acquire after sched is illegal)
+```
+
+You may take a wait-object lock then the scheduler lock. You may not
+take the scheduler lock then a wait-object lock. Documented in
+`ke/wait.c` as `LOCK_SCHED` / `LOCK_DISP`.
+
+## Reversal log
+
+none. 4-class MLFQ was considered; 32-level RR is what we will
+measure against in the performance pass.

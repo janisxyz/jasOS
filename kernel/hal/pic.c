@@ -1,0 +1,27 @@
+#include <jasos/ke.h>
+#include <jasos/kprintf.h>
+
+static inline void outb(u16 p, u8 v) { __asm__ volatile("outb %0, %1" :: "a"(v), "Nd"(p)); }
+static inline u8  inb(u16 p) { u8 v; __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(p)); return v; }
+
+void pic_remap(u8 off1, u8 off2)
+{
+    u8 a1 = inb(0x21), a2 = inb(0xA1);
+    outb(0x20, 0x11); outb(0xA0, 0x11);
+    outb(0x21, off1); outb(0xA1, off2);
+    outb(0x21, 0x04); outb(0xA1, 0x02);
+    outb(0x21, 0x01); outb(0xA1, 0x01);
+    outb(0x21, 0xFF); outb(0xA1, 0xFF);
+    (void)a1; (void)a2;
+    kprintf("pic: remapped master %u slave %u, all masked\n", off1, off2);
+}
+
+void pic_unmask(u8 irq)
+{
+    u16 port = irq < 8 ? 0x21 : 0xA1;
+    if (irq >= 8) irq -= 8;
+    u8 m = 0;
+    __asm__ volatile("inb %1, %0" : "=a"(m) : "Nd"(port));
+    m &= (u8)~(1u << irq);
+    outb(port, m);
+}

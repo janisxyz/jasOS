@@ -1,0 +1,181 @@
+# jasOS / Aegis — Architecture (locked)
+
+Living document. Append decisions and reversals; do not rewrite history.
+
+**OS name:** jasOS  
+**Kernel name:** Aegis  
+**License:** MIT  
+**Target:** x86_64, higher-half hybrid kernel  
+**Boot:** Multiboot2 (QEMU `-kernel` or GRUB2)  
+**Primary host for development:** Windows (WSL2 / QEMU / Hyper-V)
+
+---
+
+## 0. Problem statement
+
+Build a bootable x86_64 operating system whose kernel a Windows systems
+engineer would recognize: objects, handles, waitable dispatcher objects,
+NTSTATUS-shaped returns, a real syscall surface, and a panic path that
+does not lie.
+
+This is not a UNIX clone with extra steps. Process, thread, section, file,
+device, event, mutex, timer, and directory are first-class kernel objects
+with a handle table and an access mask. Userland never holds a kernel
+pointer.
+
+## Non-goals (v1)
+
+- Not Linux. No VFS superblock zoo, no cgroups, no POSIX-as-religion.
+- Not a desktop. No GPU, no compositor, no Wi-Fi stack.
+- Not a hypervisor. No EPT, no nested virt.
+- Not a network OS. No TCP/IP in v1 (loopback later).
+- Not SMP-complete. One CPU is real; IPI/affinity is stubbed with comments.
+- Not a verified kernel. We are hostile-reviewing C, not writing seL4.
+
+## Threat model
+
+| Actor | What they can try | v1 posture |
+|---|---|---|
+| Malicious userland | Arbitrary syscall args, bad pointers, handle reuse, spray | copyin/copyout, handle-rights, canonical checks, no kernel VA in maps |
+| Buggy driver | Bad IRP completion, use-after-free on device object | IRP refcount, cancel routine, driver isolation is *logical* not hardware |
+| Bad hardware | Corrupt mmap, spurious IRQ, triple-fault | Panic dumps registers; we do not "recover" from DF |
+| Hostile admin | Root-equivalent process | Token object exists; we do not pretend admin is untrusted in v1 |
+
+Isolation is handle-based, not "user is nice". A process that holds a
+handle with `FILE_READ_DATA` cannot write. A process that does not hold
+a process handle cannot `NtTerminateProcess` it, except self.
+
+---
+
+## 1. Hybrid kernel
+
+Kernel mode owns: HAL, PMM/VMM/heap, object manager, scheduler, wait,
+IRP/driver model, VFS, syscall gate.
+
+User mode owns: init, shell, utilities, future daemons.
+
+Drivers in v1 are kernel-resident. They are not a free-for-all: they
+speak IRPs, they do not call `pmm_alloc` from a DPC without a documented
+lock rank, and they never touch another process's address space except
+through `MmCopyVirtualMemory`.
+
+Reversal log: none yet. Limine was considered and rejected — Multiboot2
+is enough and does not add a third-party boot protocol to the TCB.
+
+---
+
+## 2. Address space (canonical higher-half)
+
+```
+0x0000_0000_0040_0000   user image (ET_EXEC default)
+0x0000_0000_0100_0000   user heap (brk/NtAllocateVirtualMemory)
+0x0000_7FFF_FF00_0000   user stack (grows down, guard page)
+0x0000_7FFF_FFFF_FFFF   user canonical top
+
+0x0000_8000_0000_0000   NON-CANONICAL HOLE
+        ...
+0xFFFF_7FFF_FFFF_FFFF   NON-CANONICAL HOLE
+
+0xFFFF_8000_0000_0000   direct map of physical memory (HHDM)
+0xFFFF_9000_0000_0000   kernel heap (slabs sit here)
+0xFFFF_FF00_0000_0000   recursive PML4 window (slot 510)
+0xFFFF_FFFF_8000_0000   kernel image (mcmodel=kernel, -2GB)
+```
+
+PML4[510] is recursive. Slot 511 is the kernel image. Slot 256 starts
+the HHDM. User owns 0..255.
+
+Invariant: a user page table never contains a mapping with the
+supervisor bit clear *and* a kernel virtual address. `NtMapViewOfSection`
+rejects any `BaseAddress` that is non-canonical or ≥ `0x0000800000000000`.
+
+---
+
+## 3. Interrupt model
+
+- PIC (8259) + PIT (8253/8254) in v1. Why not LAPIC first: QEMU `-kernel`
+  brings up a usable 8259/PIT without MADT parsing. LAPIC timer is the
+  next HAL commit, not a v1 blocker.
+- IDT: 256 gates. IST1 = double fault, IST2 = NMI, IST3 = machine check.
+- IRQ0 (PIT) → `ke_timer_isr` → quantum accounting → possible preemption.
+- Exceptions 0, 8, 13, 14 are fatal to the offending thread if user,
+  panic if kernel. PF in user with a valid VAD is a demand-zero (v1:
+  committed pages only, no real file-backed demand paging yet).
+- `cli` is not a lock. Spinlocks raise IRQL (logical) on SMP-future;
+  on UP they `cli` and keep a nesting count.
+
+---
+
+## 4. Process model
+
+A **Process** is an object: address space, handle table, token, list of
+threads, exit status, job-less in v1.
+
+A **Thread** is an object: kernel stack, user context, wait state,
+priority, quantum, TEB-ish user pointer (unused in v1).
+
+There is no "current process" independent of "current thread".
+`KeGetCurrentProcess()` is `KeGetCurrentThread()->process`.
+
+init (pid 1) is created by the kernel after the object manager is up.
+It is not special-cased in the scheduler; it is special-cased in
+reaping: if pid 1 exits, we panic. That is a policy, not a bug.
+
+---
+
+## 5. Syscall style
+
+`syscall`/`sysret` gate. Linux register layout (so gdb muscle memory
+works), NT-shaped returns.
+
+See [SYSCALL_ABI.md](SYSCALL_ABI.md).
+
+---
+
+## 6. Boot path
+
+See [BOOT_CONTRACT.md](BOOT_CONTRACT.md).
+
+firmware → Multiboot2 loader (GRUB or QEMU) → 32-bit stub → long mode
++ higher half → GDT/IDT/TSS → PMM from mmap → VMM + heap → object
+manager → scheduler + idle → PIT → VFS + ramfs → init → idle loop.
+
+---
+
+## 7. Kernel object types v1
+
+See [OBJECT_MODEL.md](OBJECT_MODEL.md).
+
+`Process Thread Section File Device Event Mutex Timer Directory`
+
+Token is allocated as a field of Process in v1, not a standalone type
+yet. Reversal would be to promote it when we have more than two
+integrity levels.
+
+---
+
+## 8. Toolchain (locked)
+
+- C11, GCC *or* Clang, freestanding.
+- GAS (AT&T) for boot/entry/switch/isr. No NASM dependency: `gcc` drives `as`.
+- `ld` with `kernel/linker.ld`.
+- Host test target (`make host`) compiles the same mm/ob/ke/fs sources
+  with `-DJASOS_HOST` against a POSIX HAL so the object model, VFS and
+  scheduler can be executed without QEMU.
+
+Windows: WSL2 Ubuntu 22.04+ with `build-essential qemu-system-x86`.
+See [BUILD.md](BUILD.md).
+
+---
+
+## Decision log
+
+| When | Decision | Why |
+|---|---|---|
+| T0 | Hybrid, not microkernel | Driver isolation is a later pass; objects+handles are the identity |
+| T0 | Multiboot2, not UEFI-first | QEMU `-kernel` is the inner loop; UEFI is a loader we can add |
+| T0 | PIT+PIC, not LAPIC-first | Less firmware surface to get a ticking quantum |
+| T0 | GAS, not NASM | One less tool on Windows/WSL |
+| T0 | NTSTATUS, not errno | The audience is a Windows systems engineer |
+| T1 | Drop heap/VFS locks before PMM/kalloc | Rank inversion panics were correct; the call graph was wrong |
+| T1 | Mutex release requires owner AND recursion>0 | NULL current was succeeding a release |

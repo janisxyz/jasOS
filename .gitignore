@@ -1,0 +1,13 @@
+build/
+*.o
+*.elf
+*.bin
+*.iso
+*.img
+*.map
+.ds_store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
