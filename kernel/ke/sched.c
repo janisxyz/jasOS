@@ -248,6 +248,16 @@ void sched_exit_thread(status_t st)
             /* No PROC lock: VMM=4 and HANDLE=7 are below PROC=8. */
             vmm_aspace_destroy(&proc->aspace);
             ht_destroy(&proc->handles);
+            if (proc->pid != 0 && proc->pid != 1) {
+                for (u32 i = 0; i < g_nprocs; i++) {
+                    if (g_procs[i] == proc) {
+                        g_procs[i] = g_procs[--g_nprocs];
+                        g_procs[g_nprocs] = NULL;
+                        break;
+                    }
+                }
+            }
+
         }
     }
     ke_pcb()->current = NULL;

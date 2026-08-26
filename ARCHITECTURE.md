@@ -188,6 +188,17 @@ See [BUILD.md](BUILD.md).
 | T6 | Hardware `copyin` walks PTEs, copies via HHDM | STAC+user-VA memcpy is a SMAP hole waiting to happen; HHDM never needs STAC |
 | T6 | User `NtCreateThread` parks RIP on the TCB | Calling a user VA from `thread_trampoline` is ring-0 user code. SMEP would #PF it; we refuse to try |
 | T6 | Last-thread exit drops aspace + handle table | Leaked user frames and named objects. Rank: drop PROC before VMM/HANDLE |
+| T7 | Pipe `open_fn` on insert/dup | Duplicate write handle no longer spuriously EOFs the reader |
+| T7 | Syscall Read/Write chunk at 64 KiB | A 1 MiB bounce was a kernel-heap DoS from user |
+
+---
+
+## T7 surface (0.7.0)
+
+- User Read/Write bounce in `SYSCALL_COPY_MAX` chunks; hard cap still `COPY_MAX` 1 MiB.
+- Pipe reader/writer counts follow handle insert and duplicate, not just create.
+- Dead user processes drop out of `g_procs` on last thread (pid 0/1 stay).
+
 
 ---
 

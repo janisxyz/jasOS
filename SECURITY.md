@@ -26,6 +26,8 @@ closed vs residual.
 | Syscall user pointers | marshalling bounce for Create/Read/Write/path/Event/Mutex/Section/VM/Pipe/Query/* |
 | SMEP/SMAP off | `cpu_enable_smap_smep` CPUID-gated, before `sti` |
 | Process exit leak | last thread `vmm_aspace_destroy` (walk user half, free frames+tables) + `ht_destroy` |
+| Pipe dup EOF | `open_fn` increments readers/writers on insert and duplicate |
+| Syscall bounce DoS | user Read/Write chunked at `SYSCALL_COPY_MAX`; hard cap `COPY_MAX` |
 
 ## Residual (honest)
 
@@ -38,9 +40,8 @@ closed vs residual.
 | Recursive PML4 | if a user map ever got slot 510, they own page tables | user `NtMap` rejects high VA; user half of CR3 is private |
 | Host `copyin` is memcpy | host HAL is not a security boundary | hardware path probes PTEs and copies via HHDM |
 | Admin == kernel | Token is a field, not an object | do not claim otherwise |
-| Pipe `NtDuplicateObject` | dup of a write handle does not increment `writers` | last-writer EOF can fire early; documented, not silent |
 | Kernel stack guard | canary page of `0xA5`, not a not-present PTE | IST1 still catches DF; canary panics on exit |
-| Syscall bounce 64 KiB | reads/writes > 64 KiB from user return `INVALID_PARAMETER` | chunk in 0.7 |
+
 
 ## Panic path contract
 

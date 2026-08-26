@@ -134,7 +134,37 @@ int selftest_run(void)
     NtClose(pr);
     NtClose(pw);
 
+    /* Dup write end: close original writer, pipe must not EOF until
+       the duplicate is closed too. */
+    {
+        handle_t r = 0, w = 0, w2 = 0;
+        st = NtCreatePipe(&r, &w);
+        EXPECT(NT_SUCCESS(st), "dup-pipe create");
+        st = NtDuplicateObject(HANDLE_CURRENT, w, HANDLE_CURRENT, &w2, FILE_WRITE_DATA);
+        EXPECT(NT_SUCCESS(st) && w2, "dup write handle");
+        u64 wn = 0, rn = 0;
+        st = NtWriteFile(w, "ab", 2, 0, &wn);
+        EXPECT(NT_SUCCESS(st) && wn == 2, "dup-pipe write orig");
+        NtClose(w);
+        char bb[8];
+        memset(bb, 0, sizeof(bb));
+        st = NtReadFile(r, bb, 2, 0, &rn);
+        EXPECT(NT_SUCCESS(st) && rn == 2, "dup-pipe drain after orig close");
+        wn = 0;
+        st = NtWriteFile(w2, "c", 1, 0, &wn);
+        EXPECT(NT_SUCCESS(st) && wn == 1, "dup-pipe write on dup");
+        NtClose(w2);
+        rn = 0;
+        st = NtReadFile(r, bb, 1, 0, &rn);
+        EXPECT(NT_SUCCESS(st) && rn == 1 && bb[0] == 'c', "dup-pipe last byte");
+        rn = 0;
+        st = NtReadFile(r, bb, 1, 0, &rn);
+        EXPECT(st == STATUS_END_OF_FILE, "dup-pipe eof after last writer");
+        NtClose(r);
+    }
+
     handle_t th = 0;
+
     st = NtCreateTimer(&th, NULL, true);
     EXPECT(NT_SUCCESS(st) && th, "NtCreateTimer");
     st = NtSetTimer(th, 2, 0);

@@ -448,36 +448,56 @@ status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5
         return st;
     }
     case SYS_NtReadFile: {
-        if (caller_user()) {
-            if (a2 > COPY_MAX) return STATUS_INVALID_PARAMETER;
-            void *kbuf = kalloc((usize)a2);
+        if (!caller_user())
+            return NtReadFile((handle_t)a0, (void *)a1, a2, a3, (u64 *)a4);
+        if (a2 > COPY_MAX) return STATUS_INVALID_PARAMETER;
+        u64 total = 0;
+        status_t st = STATUS_SUCCESS;
+        u64 pos = a3;
+        while (total < a2) {
+            u64 chunk = a2 - total;
+            if (chunk > SYSCALL_COPY_MAX) chunk = SYSCALL_COPY_MAX;
+            void *kbuf = kalloc((usize)chunk);
             if (!kbuf) return STATUS_NO_MEMORY;
             u64 got = 0;
-            status_t st = NtReadFile((handle_t)a0, kbuf, a2, a3, &got);
-            if (NT_SUCCESS(st) || st == STATUS_END_OF_FILE) {
-                status_t c = copyout((virt_t)a1, kbuf, got);
-                if (!NT_SUCCESS(c)) st = c;
-                if (a4) sys_put_u64((virt_t)a4, got);
+            st = NtReadFile((handle_t)a0, kbuf, chunk, pos, &got);
+            if (got) {
+                status_t c = copyout((virt_t)a1 + total, kbuf, got);
+                if (!NT_SUCCESS(c)) { kfree(kbuf); return c; }
+                total += got;
+                if (pos != (u64)-1) pos += got;
             }
             kfree(kbuf);
-            return st;
+            if (!NT_SUCCESS(st) && st != STATUS_END_OF_FILE) break;
+            if (got < chunk) break;
         }
-        return NtReadFile((handle_t)a0, (void *)a1, a2, a3, (u64 *)a4);
+        if (a4) sys_put_u64((virt_t)a4, total);
+        if (total && st == STATUS_END_OF_FILE) return STATUS_SUCCESS;
+        return st;
     }
     case SYS_NtWriteFile: {
-        if (caller_user()) {
-            if (a2 > COPY_MAX) return STATUS_INVALID_PARAMETER;
-            void *kbuf = kalloc((usize)a2);
+        if (!caller_user())
+            return NtWriteFile((handle_t)a0, (const void *)a1, a2, a3, (u64 *)a4);
+        if (a2 > COPY_MAX) return STATUS_INVALID_PARAMETER;
+        u64 total = 0;
+        status_t st = STATUS_SUCCESS;
+        u64 pos = a3;
+        while (total < a2) {
+            u64 chunk = a2 - total;
+            if (chunk > SYSCALL_COPY_MAX) chunk = SYSCALL_COPY_MAX;
+            void *kbuf = kalloc((usize)chunk);
             if (!kbuf) return STATUS_NO_MEMORY;
-            status_t st = copyin(kbuf, (virt_t)a1, a2);
+            st = copyin(kbuf, (virt_t)a1 + total, chunk);
             u64 put = 0;
             if (NT_SUCCESS(st))
-                st = NtWriteFile((handle_t)a0, kbuf, a2, a3, &put);
-            if (a4) sys_put_u64((virt_t)a4, put);
+                st = NtWriteFile((handle_t)a0, kbuf, chunk, pos, &put);
             kfree(kbuf);
-            return st;
+            total += put;
+            if (pos != (u64)-1) pos += put;
+            if (!NT_SUCCESS(st) || put < chunk) break;
         }
-        return NtWriteFile((handle_t)a0, (const void *)a1, a2, a3, (u64 *)a4);
+        if (a4) sys_put_u64((virt_t)a4, total);
+        return st;
     }
     case SYS_NtSetCwd: {
         char path[PATH_MAX];

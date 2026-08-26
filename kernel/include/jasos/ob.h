@@ -55,6 +55,8 @@ struct object;
 
 typedef void (*obj_delete_fn)(struct object *);
 typedef void (*obj_close_fn)(struct object *, access_t);
+typedef void (*obj_open_fn)(struct object *, access_t);
+
 
 typedef struct object_type {
     const char   *name;
@@ -66,7 +68,9 @@ typedef struct object_type {
     access_t      generic_all;
     obj_delete_fn delete_fn;
     obj_close_fn  close_fn;
+    obj_open_fn   open_fn;
     bool          waitable;
+
 } object_type_t;
 
 typedef struct object {

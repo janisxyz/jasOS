@@ -11,9 +11,8 @@
  *
  * Why this will fail in production:
  *  - No O_NONBLOCK. A full pipe sleeps the writer.
- *  - No writer-count; read after last close does not yet yield EOF
- *    unless both ends called NtClose on a pipe with a flag we do not
- *    store. Residual: close-from-writer EOF is next.
+ *  - Duplicate of a handle that has BOTH read and write access
+ *    increments both counts. We never issue such a handle.
  */
 
 #define PIPE_CAP 4096
@@ -53,6 +52,18 @@ static void pipe_close(object_t *o, access_t acc)
     if (eof) disp_signal(&p->can_read, 1);
 }
 
+static void pipe_open(object_t *o, access_t acc)
+{
+    pipe_object_t *p = (pipe_object_t *)o;
+    spin_lock(&p->lock);
+    if (acc & FILE_WRITE_DATA) {
+        p->writers++;
+        p->writer_closed = false;
+    }
+    if (acc & FILE_READ_DATA) p->readers++;
+    spin_unlock(&p->lock);
+}
+
 void pipe_init_type(void)
 {
     g_pipe_type.name = "Pipe";
@@ -63,8 +74,10 @@ void pipe_init_type(void)
     g_pipe_type.generic_all = FILE_ALL_ACCESS;
     g_pipe_type.delete_fn = pipe_delete;
     g_pipe_type.close_fn = pipe_close;
+    g_pipe_type.open_fn = pipe_open;
     g_pipe_type.waitable = true;
 }
+
 
 status_t NtCreatePipe(handle_t *read_out, handle_t *write_out)
 {
@@ -77,8 +90,8 @@ status_t NtCreatePipe(handle_t *read_out, handle_t *write_out)
     p->hdr.wait = &p->can_read;
     spin_init(&p->lock, "pipe", LOCK_RANK_OB);
     p->r = p->w = p->used = 0;
-    p->readers = 1;
-    p->writers = 1;
+    p->readers = 0;
+    p->writers = 0;
     p->writer_closed = false;
     handle_table_t *t = ke_current_process() ? &ke_current_process()->handles : NULL;
     if (!t) { ob_dereference(&p->hdr); return STATUS_INVALID_HANDLE; }

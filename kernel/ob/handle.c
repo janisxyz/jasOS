@@ -42,7 +42,10 @@ status_t ht_insert(handle_table_t *t, object_t *o, access_t access, handle_t *ou
             t->used++;
             *out = HANDLE_VALUE(i, t->slots[i].generation);
             spin_unlock(&t->lock);
+            if (o->type && o->type->open_fn)
+                o->type->open_fn(o, access);
             return STATUS_SUCCESS;
+
         }
     }
     spin_unlock(&t->lock);
