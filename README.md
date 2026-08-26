@@ -39,6 +39,10 @@ Clone it. `make`. `make run`. That is how you boot it.
   commit cap, overlap reject, stack guard is not a VAD
 - 0.12: mutex rundown + wait-boost, wait on process/thread, terminate
   by handle, handle inherit, per-page host shadow, `ht_destroy` rank fix
+- 0.13: `NtProtectVirtualMemory` (whole-VAD, no W^X); `g_procs` table ref
+- 0.14: VAD split on protect/free, coalesce, size-0 release, WAIT_ALL
+  owned mutex, NOACCESS frame restore
+
 
 
 
