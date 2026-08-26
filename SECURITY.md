@@ -92,7 +92,17 @@ We do not "recover". A recovered kernel after DF is a lying kernel.
 | Spawn re-elevated after drop | T19: child integrity = parent integrity (clamped 0..1) |
 | `/bin/ls` `/bin/cat` kernel-linked | unlinked; ET_EXEC + ntdll |
 
-T19 residual update: kernel-linked remainder is init/sh/ps/crash. Drop is
+T19 residual update: kernel-linked remainder is init/sh. Drop is
 sticky on spawn. integrity still *starts* at 1 for System and its
 undropped children. No Se* bitmap. envp is still one NULL.
+
+| Unlink UAF | T22: vnode refcount; File delete_fn; pin under VFS before drop |
+| `rm` bypassed the syscall gate | T22: `NtDeleteFile` 42; sh calls Nt* |
+| sh was pid 1 | T22: init spawns `/bin/sh`; pid 1 idles after wait |
+| Unlink of `/` or `/dev/console` | T22: `ACCESS_DENIED` |
+
+T22 residual: no DELETE access mask on the path walk (ramfs is
+world-unlinkable like world-creatable). No ACL. cwd may dangle at
+an unlinked dir. envp still one NULL. init/sh still kernel-linked.
+
 

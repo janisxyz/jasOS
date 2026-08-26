@@ -230,3 +230,8 @@ deref. No new VADs.
 T19: ls/cat ELF images are additional ramfs blobs. No VMM change.
 Token inherit does not allocate extra aspace.
 
+T22: vnode data+vnode `kfree` runs in `vn_release` after VFS is
+dropped (HEAP=3, VFS=11). Open pins the vnode under VFS so a racing
+unlink cannot free a walker-held pointer. No new VADs.
+
+

@@ -78,6 +78,12 @@ status_t NtCreateFile(handle_t *out, access_t access, const char *path, u32 disp
     return st;
 }
 
+status_t NtDeleteFile(const char *path)
+{
+    if (!path || !path[0]) return STATUS_INVALID_PARAMETER;
+    return vfs_unlink(path);
+}
+
 status_t NtReadFile(handle_t h, void *buf, u64 n, u64 off, u64 *got)
 {
     object_t *o;
@@ -875,6 +881,12 @@ status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5
     }
     case SYS_NtSetInformationToken:
         return NtSetInformationToken((handle_t)a0, (u32)a1);
+    case SYS_NtDeleteFile: {
+        char path[PATH_MAX];
+        status_t st = sys_path((virt_t)a0, path, sizeof(path));
+        if (!NT_SUCCESS(st)) return st;
+        return NtDeleteFile(path);
+    }
     default:                       return STATUS_INVALID_SYSTEM_SERVICE;
     }
 }

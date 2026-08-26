@@ -171,3 +171,10 @@ READY/RUNNING).
 T19: `psp_create_process` snapshots `parent->token->integrity` onto the
 new token. No ready-queue change.
 
+T22: `init_main` spawns `/bin/sh` via `NtCreateProcessEx` and
+`NtWaitForSingleObject`. sh exit signals the child Process object;
+pid 1's init thread then `NtDelayExecution` forever. `"init died"`
+still panics if pid 1's last thread exits. Host `--selftest` never
+creates init.
+
+

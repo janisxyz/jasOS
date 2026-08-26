@@ -334,3 +334,20 @@ class 5 from ring 3. Remainder kernel-linked: init/sh/crash.
 T21 start (shipped in 0.17): `/bin/crash` is ET_EXEC. `NtRaiseException` from
 ring 3 kills the thread. sh still has a ring-0 `crash` builtin command.
 
+| T22 | `vfs_unlink` UAF | File objects held `vnode *` while unlink `kfree`'d it; `rm` called VFS directly |
+| T22 | `NtDeleteFile` syscall 42 | path copyin, then unlink; sh `rm` is the syscall |
+| T22 | vnode refcount | name holds 1; each open pins; last 1→0 frees data+vnode after dropping VFS |
+| T22 | init spawns sh | `NtCreateProcessEx("/bin/sh")`; sh exit does not kill pid 1 |
+
+---
+
+## T22 surface (0.18.0)
+
+- `vnode->ref`: 1 for the directory entry, +1 per open File. `vfs_open` pins under `g_vfs_lock` after rechecking the name is still attached, so unlink cannot free a vnode the walker still holds. `vfs_file_delete` (OBJ_FILE `delete_fn`) drops the open pin. `vfs_unlink` `list_remove`s under VFS, drops the lock, then drops the name ref. `kfree` of data+vnode is HEAP after VFS — rank 3-while-11 is illegal.
+- Root, `VNODE_CHAR`, `VNODE_BLOCK` refuse with `ACCESS_DENIED`. Nonempty dirs are `CANNOT_DELETE`. Missing path is `NO_SUCH_FILE`. An open handle still reads after unlink; reopen by path fails; last close frees.
+- Syscall 42 `NtDeleteFile(path)`. `sys_path` marshalling. Empty/NULL is `INVALID_PARAMETER`. No DELETE access bit on the path walk — v1 ramfs is world-unlinkable the same way it is world-creatable. Do not print ACL.
+- `init_main` no longer calls `sh_main` in-process. It `NtCreateProcessEx("/bin/sh")` and waits. pid 1 idles after sh exits. Host `--selftest` still returns before `psp_create_init`. sh stays kernel-linked: host has no ring-3 enter.
+
+Residual: envp is still one NULL. integrity still *starts* at 1. init/sh kernel-linked. No Se* bitmap. No DELETE right on unlink. virtio identify-only. mixed-VAD protect fail-closed. PIC not LAPIC. OOM unmap 16-page batch leak. host copyin is memcpy.
+
+

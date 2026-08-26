@@ -224,3 +224,10 @@ T19: child Token integrity is a snapshot of the parent Token at
 `/bin/cat` are Process objects whose image is an ELF section map,
 not kernel builtins.
 
+T22: File `delete_fn` is `vfs_file_delete`. It drops the vnode open
+pin. Unlink drops the name pin after `list_remove`. 1→0 frees the
+vnode. A File object may outlive its directory entry; the handle
+is still a valid object until close. Devices and `/` are not
+deletable objects via this path — they fail at VFS, not at Ob.
+
+

@@ -1193,6 +1193,98 @@ int selftest_run(void)
         NtClose(crh);
     }
 
+    /* T22: NtDeleteFile. Unlink of an open file is not a UAF: the handle
+       still reads, the name is gone, last close frees. Devices and root
+       refuse. Empty dirs unlink; nonempty dirs cannot. */
+    {
+        st = NtDeleteFile(NULL);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "delete null path");
+        st = NtDeleteFile("");
+        EXPECT(st == STATUS_INVALID_PARAMETER, "delete empty path");
+        st = NtDeleteFile("/no/such/t22");
+        EXPECT(st == STATUS_NO_SUCH_FILE, "delete missing");
+        st = NtDeleteFile("/");
+        EXPECT(st == STATUS_ACCESS_DENIED, "delete root denied");
+        st = NtDeleteFile("/dev/console");
+        EXPECT(st == STATUS_ACCESS_DENIED, "delete console denied");
+        st = NtDeleteFile("/dev/ram0");
+        EXPECT(st == STATUS_ACCESS_DENIED, "delete ram0 denied");
+
+        handle_t hf = 0;
+        st = NtCreateFile(&hf, FILE_READ_DATA | FILE_WRITE_DATA, "/tmp/t22",
+                          FILE_CREATE, FILE_NON_DIRECTORY_FILE);
+        EXPECT(NT_SUCCESS(st) && hf, "t22 create");
+        u64 n = 0;
+        st = NtWriteFile(hf, "gone", 4, 0, &n);
+        EXPECT(NT_SUCCESS(st) && n == 4, "t22 write");
+        NtClose(hf);
+        st = NtDeleteFile("/tmp/t22");
+        EXPECT(NT_SUCCESS(st), "t22 delete");
+        hf = 0;
+        st = NtCreateFile(&hf, FILE_READ_DATA, "/tmp/t22", FILE_OPEN, FILE_NON_DIRECTORY_FILE);
+        EXPECT(st == STATUS_NO_SUCH_FILE, "t22 reopen after delete");
+
+        handle_t ho = 0;
+        st = NtCreateFile(&ho, FILE_READ_DATA | FILE_WRITE_DATA, "/tmp/t22open",
+                          FILE_CREATE, FILE_NON_DIRECTORY_FILE);
+        EXPECT(NT_SUCCESS(st) && ho, "t22 open-then-unlink create");
+        n = 0;
+        st = NtWriteFile(ho, "keep", 4, 0, &n);
+        EXPECT(NT_SUCCESS(st) && n == 4, "t22 open write");
+        st = NtDeleteFile("/tmp/t22open");
+        EXPECT(NT_SUCCESS(st), "t22 unlink while open");
+        handle_t hx = 0;
+        st = NtCreateFile(&hx, FILE_READ_DATA, "/tmp/t22open", FILE_OPEN, FILE_NON_DIRECTORY_FILE);
+        EXPECT(st == STATUS_NO_SUCH_FILE, "t22 name gone while handle live");
+        char buf[8];
+        memset(buf, 0, sizeof(buf));
+        n = 0;
+        st = NtReadFile(ho, buf, 4, 0, &n);
+        EXPECT(NT_SUCCESS(st) && n == 4 && buf[0] == 'k' && buf[3] == 'p',
+               "t22 handle still readable after unlink");
+        NtClose(ho);
+        st = NtCreateFile(&hx, FILE_READ_DATA, "/tmp/t22open", FILE_OPEN, FILE_NON_DIRECTORY_FILE);
+        EXPECT(st == STATUS_NO_SUCH_FILE, "t22 gone after last close");
+
+        handle_t hd = 0;
+        st = NtCreateFile(&hd, FILE_READ_DATA, "/tmp/t22dir", FILE_CREATE, FILE_DIRECTORY_FILE);
+        EXPECT(NT_SUCCESS(st) && hd, "t22 mkdir");
+        NtClose(hd);
+        handle_t hi = 0;
+        st = NtCreateFile(&hi, FILE_WRITE_DATA, "/tmp/t22dir/inside",
+                          FILE_CREATE, FILE_NON_DIRECTORY_FILE);
+        EXPECT(NT_SUCCESS(st) && hi, "t22 dir child");
+        NtClose(hi);
+        st = NtDeleteFile("/tmp/t22dir");
+        EXPECT(st == STATUS_CANNOT_DELETE, "t22 nonempty dir");
+        st = NtDeleteFile("/tmp/t22dir/inside");
+        EXPECT(NT_SUCCESS(st), "t22 unlink child");
+        st = NtDeleteFile("/tmp/t22dir");
+        EXPECT(NT_SUCCESS(st), "t22 empty dir unlink");
+        st = NtCreateFile(&hd, FILE_READ_DATA, "/tmp/t22dir", FILE_OPEN, FILE_DIRECTORY_FILE);
+        EXPECT(st == STATUS_NO_SUCH_FILE, "t22 dir gone");
+
+        /* Recreate after unlink: name is free. */
+        st = NtCreateFile(&hf, FILE_WRITE_DATA, "/tmp/t22", FILE_CREATE, FILE_NON_DIRECTORY_FILE);
+        EXPECT(NT_SUCCESS(st) && hf, "t22 recreate");
+        NtClose(hf);
+        st = NtDeleteFile("/tmp/t22");
+        EXPECT(NT_SUCCESS(st), "t22 redelete");
+
+        handle_t shh = 0;
+        st = NtCreateProcess(&shh, PROCESS_ALL_ACCESS, "/bin/sh", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st) && shh, "init-style sh spawn");
+        object_t *sho = NULL;
+        st = ht_lookup(&psp_system_process()->handles, shh, 0, OBJ_PROCESS, &sho);
+        EXPECT(NT_SUCCESS(st) && sho, "sh process lookup");
+        process_t *shp = (process_t *)sho;
+        EXPECT(!shp->user_mode, "sh still kernel-linked");
+        EXPECT(builtin_lookup("/bin/sh", NULL), "sh still a builtin");
+        EXPECT(shp->pid != 1, "spawned sh is not pid 1");
+        ob_dereference(sho);
+        NtClose(shh);
+    }
+
     kprintf("selftest: all assertions passed\n");
     return 0;
 }

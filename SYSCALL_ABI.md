@@ -73,6 +73,8 @@ bits 0..15   code
 | `STATUS_NOT_A_DIRECTORY` | `0xC0000103` | |
 | `STATUS_PROCESS_IS_TERMINATING` | `0xC000010A` | |
 | `STATUS_CANCELLED` | `0xC0000120` | IRP cancelled |
+| `STATUS_CANNOT_DELETE` | `0xC0000121` | nonempty directory |
+| `STATUS_FILE_DELETED` | `0xC0000123` | reserved; reopen-by-path is `NO_SUCH_FILE` |
 
 ## Copyin / copyout
 
@@ -134,6 +136,11 @@ Max copyin size v1: 1 MiB. Bigger is `STATUS_INVALID_PARAMETER`.
 | 35 | `NtCancelTimer` | handle | | | | |
 | 36 | `NtWaitForMultipleObjects` | handles | count | wait_all | timeout | |
 | 37 | `NtProtectVirtualMemory` | process | base | size | prot | old_prot |
+| 38 | `NtOpenProcessToken` | process (`-1` self) | access | out | | |
+| 39 | `NtQueryInformationToken` | token | buf | len | | |
+| 40 | `NtDuplicateToken` | src | access | out | | |
+| 41 | `NtSetInformationToken` | token | integrity | | | |
+| 42 | `NtDeleteFile` | path | | | | |
 
 `-1` as a process/thread handle means current. Real handles are
 `(generation << 16) | (index << 2)`, never all-ones.
@@ -217,4 +224,9 @@ T18 start: syscall 41 `NtSetInformationToken` a0 token a1 integrity
 T19: no new syscall. `NtCreateProcess` still mints the child token from the
 *parent process object*, not from a token handle the caller passed.
 `/bin/ls` and `/bin/cat` go through syscall 6 like `/bin/echo`.
+
+T22: syscall 42 `NtDeleteFile` a0 path. `copyinstr` then `vfs_unlink`.
+SYS_MAX is 43. sh `rm` is this syscall, not a VFS call. No handle;
+no DELETE bit. Root and devices are `ACCESS_DENIED`.
+
 

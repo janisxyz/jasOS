@@ -1,7 +1,6 @@
 #include <jasos/syscall.h>
 #include <jasos/kprintf.h>
 #include <jasos/string.h>
-#include <jasos/fs.h>
 #include <jasos/config.h>
 #include <jasos/status.h>
 #include <jasos/ke.h>
@@ -205,7 +204,7 @@ int sh_main(int argc, char **argv)
                 else if (strcmp(av[0], "touch") == 0) cmd_touch(ac > 1 ? av[1] : NULL);
                 else if (strcmp(av[0], "write") == 0) cmd_write(ac > 1 ? av[1] : NULL, ac > 2 ? av[2] : "");
                 else if (strcmp(av[0], "rm") == 0) {
-                    status_t st = vfs_unlink(ac > 1 ? av[1] : "");
+                    status_t st = NtDeleteFile(ac > 1 ? av[1] : "");
                     if (!NT_SUCCESS(st)) kprintf("rm: %s\n", status_name(st));
                 } else if (strcmp(av[0], "cd") == 0) {
                     status_t st = NtSetCwd(ac > 1 ? av[1] : "/");

@@ -304,7 +304,7 @@ void ob_init(void)
     type_init(OBJ_SECTION, "Section", sizeof(section_object_t) - sizeof(object_t), false,
               SECTION_MAP_READ, SECTION_MAP_WRITE, SECTION_MAP_EXECUTE, SECTION_ALL_ACCESS, NULL);
     type_init(OBJ_FILE, "File", sizeof(file_object_t) - sizeof(object_t), false,
-              FILE_READ_DATA, FILE_WRITE_DATA, FILE_EXECUTE, FILE_ALL_ACCESS, NULL);
+              FILE_READ_DATA, FILE_WRITE_DATA, FILE_EXECUTE, FILE_ALL_ACCESS, vfs_file_delete);
     type_init(OBJ_DEVICE, "Device", sizeof(device_object_t) - sizeof(object_t), false,
               FILE_READ_DATA, FILE_WRITE_DATA, 0, FILE_ALL_ACCESS, NULL);
     type_init(OBJ_EVENT, "Event", sizeof(event_object_t) - sizeof(object_t), true,

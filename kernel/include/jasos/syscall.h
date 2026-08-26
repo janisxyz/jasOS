@@ -46,7 +46,8 @@
 #define SYS_NtQueryInformationToken    39
 #define SYS_NtDuplicateToken           40
 #define SYS_NtSetInformationToken      41
-#define SYS_MAX                        42
+#define SYS_NtDeleteFile               42
+#define SYS_MAX                        43
 
 status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 *info);
 
@@ -95,6 +96,7 @@ status_t NtOpenProcessToken(handle_t proc, access_t access, handle_t *out);
 status_t NtQueryInformationToken(handle_t h, void *buf, u64 n);
 status_t NtDuplicateToken(handle_t src, access_t access, handle_t *out);
 status_t NtSetInformationToken(handle_t h, u32 integrity);
+status_t NtDeleteFile(const char *path);
 
 typedef struct sys_process_info {
     kpid_t pid;

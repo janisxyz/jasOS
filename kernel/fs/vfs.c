@@ -68,6 +68,34 @@ static vnode_t *vn_child(vnode_t *dir, const char *name)
     return NULL;
 }
 
+/*
+ * Vnode refs: 1 for the directory entry (name), +1 per open File object.
+ * Unlink drops the name ref after list_remove. File delete_fn drops the
+ * open ref. Free data+vnode only on 1→0, and never while holding VFS
+ * (HEAP=3 is below VFS=11).
+ */
+static void vn_release(vnode_t *v)
+{
+    if (!v) return;
+    u64 old = __sync_fetch_and_sub(&v->ref, 1);
+    if (old == 0) panic("vnode ref underflow %s", v->name[0] ? v->name : "/");
+    if (old != 1) return;
+    u8 *data = v->data;
+    v->data = NULL;
+    v->cap = 0;
+    v->size = 0;
+    if (data) kfree(data);
+    kfree(v);
+}
+
+void vfs_file_delete(object_t *o)
+{
+    file_object_t *f = (file_object_t *)o;
+    vnode_t *v = f->vnode;
+    f->vnode = NULL;
+    vn_release(v);
+}
+
 status_t path_norm(const char *cwd, const char *in, char *out, usize cap)
 {
     char tmp[PATH_MAX];
@@ -184,14 +212,16 @@ status_t vfs_mkdir(const char *path)
     return STATUS_SUCCESS;
 }
 
-static file_object_t *fo_from_vnode(vnode_t *v, access_t access)
+static file_object_t *fo_from_pinned(vnode_t *v, access_t access)
 {
     file_object_t *f = (file_object_t *)ob_create(ob_type_file(), v->name, NULL);
-    if (!f) return NULL;
+    if (!f) {
+        vn_release(v);
+        return NULL;
+    }
     f->vnode = v;
     f->offset = 0;
     f->access = access;
-    v->ref++;
     return f;
 }
 
@@ -216,18 +246,28 @@ status_t vfs_open(const char *path, access_t access, u32 disp, u32 opts, file_ob
         spin_lock(&g_vfs_lock);
         vnode_t *race = vn_child(parent, leaf);
         if (race) {
+            atomic_inc64(&race->ref);
             spin_unlock(&g_vfs_lock);
             kfree(nv);
             v = race;
         } else {
             vn_attach(parent, nv);
+            atomic_inc64(&nv->ref);
             spin_unlock(&g_vfs_lock);
             v = nv;
         }
     } else if (disp == FILE_CREATE) {
         return STATUS_OBJECT_NAME_COLLISION;
+    } else {
+        spin_lock(&g_vfs_lock);
+        if (v != g_root_vnode && (!v->parent || vn_child(v->parent, v->name) != v)) {
+            spin_unlock(&g_vfs_lock);
+            return STATUS_NO_SUCH_FILE;
+        }
+        atomic_inc64(&v->ref);
+        spin_unlock(&g_vfs_lock);
     }
-    file_object_t *f = fo_from_vnode(v, access);
+    file_object_t *f = fo_from_pinned(v, access);
     if (!f) return STATUS_NO_MEMORY;
     *out = f;
     return STATUS_SUCCESS;
@@ -388,16 +428,26 @@ status_t vfs_unlink(const char *path)
     process_t *p = ke_current_process();
     status_t st = path_norm(p ? p->cwd : "/", path, abs, PATH_MAX);
     if (!NT_SUCCESS(st)) return st;
+    if (abs[0] == '/' && abs[1] == 0) return STATUS_ACCESS_DENIED;
     vnode_t *parent, *v;
     st = walk(abs, &parent, &v, leaf, true);
     if (!NT_SUCCESS(st) || !v) return STATUS_NO_SUCH_FILE;
-    if (v->kind == VNODE_DIR && !list_empty(&v->children)) return STATUS_CANNOT_DELETE;
+    if (v == g_root_vnode) return STATUS_ACCESS_DENIED;
+    if (v->kind == VNODE_CHAR || v->kind == VNODE_BLOCK)
+        return STATUS_ACCESS_DENIED;
     spin_lock(&g_vfs_lock);
+    if (!parent || vn_child(parent, leaf) != v) {
+        spin_unlock(&g_vfs_lock);
+        return STATUS_NO_SUCH_FILE;
+    }
+    if (v->kind == VNODE_DIR && !list_empty(&v->children)) {
+        spin_unlock(&g_vfs_lock);
+        return STATUS_CANNOT_DELETE;
+    }
     list_remove(&v->sibling);
-    u8 *data = v->data;
+    v->parent = NULL;
     spin_unlock(&g_vfs_lock);
-    if (data) kfree(data);
-    kfree(v);
+    vn_release(v);
     return STATUS_SUCCESS;
 }
 

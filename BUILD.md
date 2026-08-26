@@ -171,3 +171,9 @@ spawn up), System child still admin, `/bin/ls` and `/bin/cat` as ELF
 
 0.17 also covers `/bin/ps` as ELF (T20 start).
 
+0.18 selftest covers `NtDeleteFile`: missing path, root/console/ram0
+denied, create+delete+reopen fail, open-then-unlink handle still
+readable, nonempty dir `CANNOT_DELETE`, empty dir unlink, init-style
+`NtCreateProcess("/bin/sh")` is not pid 1 and not `user_mode`.
+
+

@@ -78,6 +78,8 @@ and does not claim I/O. `io_init` brings up Serial0 and Ramdisk0.
 10. `syscall_init()` — `IA32_LSTAR`, `IA32_STAR`, `IA32_FMASK`, `IA32_EFER.SCE`.
 11. `pit_init(100)` — 100 Hz. Unmask IRQ0. `sti`.
 12. `psp_create_system_process()` then `psp_create_init()`.
+    init (pid 1) prints motd and `NtCreateProcessEx("/bin/sh")`.
+    It does not call `sh_main` in-process.
 13. `sched_start()` — does not return.
 
 ## Failure modes

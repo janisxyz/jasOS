@@ -1,10 +1,8 @@
 #include <jasos/syscall.h>
 #include <jasos/kprintf.h>
 #include <jasos/string.h>
-#include <jasos/fs.h>
+#include <jasos/status.h>
 #include <jasos/ke.h>
-
-extern int sh_main(int argc, char **argv);
 
 #ifdef JASOS_HOST
 extern int host_wants_shell(void);
@@ -37,7 +35,15 @@ int init_main(int argc, char **argv)
     }
 #endif
     kprintf("init: launching sh\n");
-    char *av[] = { "sh", NULL };
-    sh_main(1, av);
+    handle_t sh = 0;
+    const char *av[] = { "/bin/sh" };
+    status_t st = NtCreateProcessEx(&sh, PROCESS_ALL_ACCESS, "/bin/sh", 0, av, 1);
+    if (!NT_SUCCESS(st)) {
+        kprintf("init: spawn sh failed %s\n", status_name(st));
+        return 0;
+    }
+    NtWaitForSingleObject(sh, (u64)-1);
+    NtClose(sh);
+    kprintf("init: sh exited, idling\n");
     return 0;
 }
