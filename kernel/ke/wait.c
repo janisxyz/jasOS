@@ -7,11 +7,13 @@
  *
  * Why this will fail in production:
  *  - Multi-object wait (WaitForMultipleObjects) is not implemented.
- *  - Timeout scan is "check on the way in + tick"; a thread waiting
- *    with a timeout is not on a timer queue, so timeout fires lazily
- *    on the next wait/tick of anyone. Host tests tick in sched_start.
- * Fixed here: mutex ownership is checked; abandoned mutex wakes with
- * STATUS_ABANDONED; wait at raised rank panics in the lock path.
+ *  - A thread killed while on a wait list is not purged in v1; we
+ *    require exit to run sched_exit_thread which does not walk every
+ *    object. Residual: dying-while-waiting is a leak of the wait block
+ *    (the thread object stays referenced by the list until signal).
+ * Fixed here: mutex ownership transfers in disp_wake_one; abandoned
+ * mutex wakes with STATUS_ABANDONED; wait never holds DISP across
+ * a SCHED acquire without the T3 ranking (DISP=9 < SCHED=10).
  */
 
 status_t ke_wait_object(dispatcher_t *d, u64 timeout_ticks)
@@ -38,7 +40,8 @@ status_t ke_wait_object(dispatcher_t *d, u64 timeout_ticks)
             return st;
         }
     } else if (d->signal_state > 0) {
-        if (d->type == DISP_SYNCHRONIZATION_EVENT) d->signal_state = 0;
+        if (d->type == DISP_SYNCHRONIZATION_EVENT || d->type == DISP_TIMER)
+            d->signal_state = 0;
         spin_unlock(&d->lock);
         return STATUS_SUCCESS;
     }
@@ -65,8 +68,7 @@ status_t ke_wait_object(dispatcher_t *d, u64 timeout_ticks)
 status_t ke_set_event(event_object_t *e)
 {
     if (!e) return STATUS_INVALID_PARAMETER;
-    disp_signal(&e->disp, e->auto_reset ? (e->disp.signal_state ? 0 : 1) : 1);
-    if (!e->auto_reset) e->disp.signal_state = 1;
+    disp_signal(&e->disp, 1);
     return STATUS_SUCCESS;
 }
 
@@ -93,13 +95,14 @@ status_t ke_release_mutex(mutex_object_t *m)
         return STATUS_SUCCESS;
     }
     m->owner = NULL;
-    m->disp.signal_state = 1;
-    disp_wake_one(&m->disp, STATUS_SUCCESS);
-    /* The waker must transfer ownership if someone was waiting. */
-    if (m->disp.signal_state == 0) {
-        /* wake_one decremented via... we didn't. Manual: */
+    if (list_empty(&m->disp.wait_list)) {
+        m->disp.signal_state = 1;
+        spin_unlock(&m->disp.lock);
+    } else {
+        /* Transfer while still holding DISP; wake_one takes SCHED. */
+        disp_wake_one(&m->disp, STATUS_SUCCESS);
+        spin_unlock(&m->disp.lock);
     }
-    spin_unlock(&m->disp.lock);
     if (t->priority != t->saved_priority) {
         t->priority = t->saved_priority;
         ke_pcb()->need_resched = true;

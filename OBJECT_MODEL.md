@@ -50,7 +50,12 @@ Per-process. v1 is a single 1024-slot array, slot 0 reserved. Handle
 value:
 
 ```
-handle = (index << 2) | 0x4     // never 0, never -1, 4-aligned
+handle = index << 2     // never 0, never -1, 4-aligned. index starts at 1.
+
+v0.1 encoded `(index << 2) | 4` which aliases index 2 with index 3
+(`8|4 == 12 == 12|0`). Caught by NtCreatePipe inserting two handles.
+Fixed in v0.2: shift is the tag. Low 2 bits must be 0; `HANDLE_CURRENT`
+(`-1`) is still not a table index.
 ```
 
 `-1` (`0xFFFFFFFFFFFFFFFF`) is the current-process/thread sentinel and

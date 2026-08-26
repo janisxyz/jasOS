@@ -80,16 +80,54 @@ status_t elf_load(process_t *p, const u8 *image, u64 len, virt_t *entry_out)
         virt_t base = va;
         status_t st = vmm_alloc_user(p, &base, size, prot, MEM_COMMIT);
         if (!NT_SUCCESS(st)) return st;
-#ifdef JASOS_HOST
-        memcpy((void *)(uintptr_t)ph[i].p_vaddr, image + ph[i].p_offset, (size_t)ph[i].p_filesz);
-#else
-        /* Hardware: the pages are mapped; copy through HHDM of the phys
-           backing. v1 copies via the mapped user VA after the map is in
-           the *current* aspace — loader must run in the target process
-           or we need MmCopyVirtualMemory. We run in-process. */
-        memcpy((void *)(uintptr_t)ph[i].p_vaddr, image + ph[i].p_offset, (size_t)ph[i].p_filesz);
-#endif
+        if (ph[i].p_filesz) {
+            st = vmm_write_aspace(&p->aspace, ph[i].p_vaddr,
+                                  image + ph[i].p_offset, ph[i].p_filesz);
+            if (!NT_SUCCESS(st)) return st;
+        }
     }
     if (entry_out) *entry_out = eh->e_entry;
     return STATUS_SUCCESS;
+}
+
+/*
+ * Tiny ET_EXEC used by host selftest so ELF coverage does not depend
+ * on the userland toolchain having already run.
+ */
+u64 elf_make_minimal_hello(u8 *out, u64 cap)
+{
+    if (!out || cap < 0x80) return 0;
+    memset(out, 0, (size_t)cap);
+    /* e_ident */
+    out[0] = 0x7f; out[1] = 'E'; out[2] = 'L'; out[3] = 'F';
+    out[4] = 2;    out[5] = 1;   out[6] = 1;
+    /* e_type ET_EXEC, e_machine EM_X86_64, e_version 1 */
+    out[16] = 2; out[17] = 0;
+    out[18] = 62; out[19] = 0;
+    out[20] = 1; out[21] = 0; out[22] = 0; out[23] = 0;
+    /* e_entry = 0x400000 */
+    out[24] = 0x00; out[25] = 0x00; out[26] = 0x40; out[27] = 0x00;
+    /* e_phoff = 64 */
+    out[32] = 64;
+    /* e_ehsize = 64, e_phentsize = 56, e_phnum = 1 */
+    out[52] = 64; out[53] = 0;
+    out[54] = 56; out[55] = 0;
+    out[56] = 1;  out[57] = 0;
+    /* phdr at 64: PT_LOAD, PF_R|PF_X, offset 0, vaddr 0x400000,
+       filesz/memsz 0x80, align 0x1000 */
+    out[64] = 1; /* PT_LOAD */
+    out[68] = 5; /* PF_R|PF_X */
+    out[80] = 0x00; out[81] = 0x00; out[82] = 0x40; out[83] = 0x00; /* vaddr */
+    out[88] = 0x00; out[89] = 0x00; out[90] = 0x40; out[91] = 0x00; /* paddr */
+    out[96] = 0x80; /* filesz */
+    out[104] = 0x80; /* memsz */
+    out[112] = 0x00; out[113] = 0x10; /* align 0x1000 */
+    /* code at file offset 0 is overlapping the header — that's legal.
+       Put `ret` at entry 0x400000 which is file offset 0. Overwriting
+       EI_MAG is fatal, so put a NOP sled at 0x400000 by using entry
+       at 0x400040 (file offset 0x40 is inside the phdr). Simpler:
+       filesz covers header+code; entry at 0x400070 = offset 0x70. */
+    out[24] = 0x70; /* e_entry = 0x400070 */
+    out[0x70] = 0xC3; /* ret */
+    return 0x80;
 }

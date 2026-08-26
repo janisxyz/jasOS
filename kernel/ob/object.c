@@ -213,8 +213,16 @@ void disp_wake_one(dispatcher_t *d, status_t st)
     wait_block_t *wb = CONTAINER_OF(e, wait_block_t, obj_link);
     list_remove(&wb->obj_link);
     wb->wake_status = st;
+    if (d->type == DISP_MUTANT) {
+        mutex_object_t *m = CONTAINER_OF(d, mutex_object_t, disp);
+        m->owner = wb->thread;
+        m->recursion = 1;
+        m->abandoned = (st == STATUS_ABANDONED);
+        d->signal_state = 0;
+    }
     if (wb->thread && wb->thread->state == THR_WAITING) {
-        wb->thread->state = THR_READY;
+        /* sched_ready takes SCHED. Caller may hold DISP (rank 9).
+           DISP < SCHED is the T3 contract. */
         sched_ready(wb->thread);
     }
 }
@@ -275,7 +283,8 @@ void ob_init(void)
               PROCESS_QUERY_INFORMATION, PROCESS_VM_WRITE, PROCESS_CREATE_THREAD, PROCESS_ALL_ACCESS, NULL);
     type_init(OBJ_THREAD, "Thread", sizeof(thread_t) - sizeof(object_t), true,
               THREAD_QUERY_INFORMATION, THREAD_SUSPEND_RESUME, 0, THREAD_ALL_ACCESS, NULL);
-    type_init(OBJ_SECTION, "Section", 64, false, FILE_READ_DATA, FILE_WRITE_DATA, FILE_EXECUTE, FILE_ALL_ACCESS, NULL);
+    type_init(OBJ_SECTION, "Section", sizeof(section_object_t) - sizeof(object_t), false,
+              SECTION_MAP_READ, SECTION_MAP_WRITE, SECTION_MAP_EXECUTE, SECTION_ALL_ACCESS, NULL);
     type_init(OBJ_FILE, "File", sizeof(file_object_t) - sizeof(object_t), false,
               FILE_READ_DATA, FILE_WRITE_DATA, FILE_EXECUTE, FILE_ALL_ACCESS, NULL);
     type_init(OBJ_DEVICE, "Device", sizeof(device_object_t) - sizeof(object_t), false,

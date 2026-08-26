@@ -17,6 +17,7 @@ typedef enum object_kind {
     OBJ_EVENT,
     OBJ_MUTEX,
     OBJ_TIMER,
+    OBJ_PIPE,
     OBJ_TYPE_MAX
 } object_kind_t;
 
@@ -100,6 +101,13 @@ typedef struct mutex_object {
     bool           abandoned;
 } mutex_object_t;
 
+typedef struct section_object {
+    object_t  hdr;
+    u64       size;
+    u32       prot;
+    u8       *kdata;
+} section_object_t;
+
 typedef struct timer_object {
     object_t     hdr;
     dispatcher_t disp;
@@ -148,10 +156,15 @@ void     ht_destroy(handle_table_t *t);
 status_t ht_insert(handle_table_t *t, object_t *o, access_t access, handle_t *out);
 status_t ht_lookup(handle_table_t *t, handle_t h, access_t required, object_kind_t expect, object_t **out);
 status_t ht_close(handle_table_t *t, handle_t h);
+status_t ht_duplicate(handle_table_t *src, handle_t h, handle_table_t *dst, access_t access, handle_t *out);
 access_t ob_map_generic(object_type_t *type, access_t access);
 
 status_t ob_create_event(const char *name, bool auto_reset, bool initial, event_object_t **out);
 status_t ob_create_mutex(const char *name, bool initial_owner, mutex_object_t **out);
+
+status_t pipe_read(object_t *o, void *buf, u64 n, u64 *got);
+status_t pipe_write(object_t *o, const void *buf, u64 n, u64 *put);
+void     pipe_init_type(void);
 
 void disp_init(dispatcher_t *d, disp_type_t type, i32 state);
 void disp_signal(dispatcher_t *d, i32 increment);

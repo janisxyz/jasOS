@@ -53,6 +53,20 @@ void gdt_init(void)
     gdtr.len = sizeof(gdt) - 1;
     gdtr.ptr = (u64)&gdt;
     __asm__ volatile("lgdt %0" :: "m"(gdtr));
+    __asm__ volatile(
+        "pushq $0x08\n"
+        "leaq 1f(%%rip), %%rax\n"
+        "pushq %%rax\n"
+        "lretq\n"
+        "1:\n"
+        "mov $0x10, %%ax\n"
+        "mov %%ax, %%ds\n"
+        "mov %%ax, %%es\n"
+        "mov %%ax, %%ss\n"
+        "mov %%ax, %%fs\n"
+        "xor %%ax, %%ax\n"
+        "mov %%ax, %%gs\n"
+        ::: "rax", "memory");
     kprintf("gdt: kcode=08 kdata=10 ucode=20 udata=18\n");
 }
 
@@ -70,4 +84,9 @@ void tss_init(void)
     gdt[6].base_low  = (u16)(b >> 48);
     __asm__ volatile("ltr %0" :: "r"((u16)0x28));
     kprintf("tss: IST1-3 armed for DF/NMI/MC\n");
+}
+
+void tss_set_rsp0(u64 rsp)
+{
+    tss.rsp0 = rsp;
 }

@@ -6,18 +6,39 @@
 #include <jasos/kprintf.h>
 #include <jasos/string.h>
 #include <jasos/status.h>
+#include <jasos/elf.h>
 
 #define EXPECT(cond, msg) do { \
     if (!(cond)) { kprintf("FAIL %s\n", msg); return -1; } \
     kprintf("  ok %s\n", msg); \
 } while (0)
 
+static volatile int g_ping, g_pong;
+static event_object_t *g_e1, *g_e2;
+
+static void ping_fn(void *arg)
+{
+    (void)arg;
+    g_ping = 1;
+    ke_set_event(g_e1);
+    ke_wait_object(&g_e2->disp, (u64)-1);
+    g_ping = 2;
+}
+
+static void pong_fn(void *arg)
+{
+    (void)arg;
+    ke_wait_object(&g_e1->disp, (u64)-1);
+    g_pong = 1;
+    ke_set_event(g_e2);
+}
+
 int selftest_run(void)
 {
     kprintf("selftest: begin\n");
 
     u64 free0 = pmm_free_pages();
-    phys_t p = pmm_alloc(3, PMM_KERNEL | PMM_ZERO); /* 8 pages */
+    phys_t p = pmm_alloc(3, PMM_KERNEL | PMM_ZERO);
     EXPECT(p != PMM_INVALID, "pmm_alloc order 3");
     EXPECT(pmm_free_pages() == free0 - 8, "pmm account");
     pmm_free(p, 3);
@@ -82,7 +103,6 @@ int selftest_run(void)
     mutex_object_t *mx = NULL;
     st = ob_create_mutex(NULL, false, &mx);
     EXPECT(NT_SUCCESS(st), "mutex create");
-    /* No current thread: release must fail ownership. */
     st = ke_release_mutex(mx);
     EXPECT(st == STATUS_MUTANT_NOT_OWNED, "mutex not owned");
     ob_dereference(&mx->hdr);
@@ -100,6 +120,65 @@ int selftest_run(void)
     EXPECT(NT_SUCCESS(st), "readdir /etc");
     kprintf("  /etc: %s\n", dirbuf);
     NtClose(dh);
+
+    handle_t pr = 0, pw = 0;
+    st = NtCreatePipe(&pr, &pw);
+    EXPECT(NT_SUCCESS(st) && pr && pw, "NtCreatePipe");
+    u64 wn = 0, rn = 0;
+    st = NtWriteFile(pw, "pipe-ok", 7, 0, &wn);
+    EXPECT(NT_SUCCESS(st) && wn == 7, "pipe write");
+    char pbuf[16];
+    memset(pbuf, 0, sizeof(pbuf));
+    st = NtReadFile(pr, pbuf, 7, 0, &rn);
+    EXPECT(NT_SUCCESS(st) && rn == 7 && memcmp(pbuf, "pipe-ok", 7) == 0, "pipe read");
+    NtClose(pr);
+    NtClose(pw);
+
+    handle_t th = 0;
+    st = NtCreateTimer(&th, NULL, true);
+    EXPECT(NT_SUCCESS(st) && th, "NtCreateTimer");
+    st = NtSetTimer(th, 2, 0);
+    EXPECT(NT_SUCCESS(st), "NtSetTimer");
+    for (int i = 0; i < 8; i++) ke_on_tick();
+    st = NtCancelTimer(th);
+    EXPECT(NT_SUCCESS(st), "NtCancelTimer");
+    NtClose(th);
+
+    handle_t sec = 0;
+    st = NtCreateSection(&sec, SECTION_ALL_ACCESS, 4096, PAGE_READWRITE);
+    EXPECT(NT_SUCCESS(st) && sec, "NtCreateSection");
+    virt_t mapbase = 0x0000000002000000ULL;
+    st = NtMapViewOfSection(sec, HANDLE_CURRENT, &mapbase, 4096, PAGE_READWRITE);
+    EXPECT(NT_SUCCESS(st), "NtMapViewOfSection");
+    NtUnmapViewOfSection(HANDLE_CURRENT, mapbase);
+    NtClose(sec);
+
+    process_t *loader = psp_system_process();
+    u8 mini[128];
+    u64 elen = elf_make_minimal_hello(mini, sizeof(mini));
+    EXPECT(elen == 0x80, "elf_make_minimal_hello");
+    virt_t entry = 0;
+    st = elf_load(loader, mini, elen, &entry);
+    EXPECT(NT_SUCCESS(st) && entry == 0x400070ULL, "elf_load");
+
+    handle_t child = 0;
+    st = NtCreateProcess(&child, PROCESS_ALL_ACCESS, "/bin/echo", CREATE_SUSPENDED);
+    EXPECT(NT_SUCCESS(st) && child, "NtCreateProcess suspended builtin");
+    NtClose(child);
+
+    g_ping = g_pong = 0;
+    st = ob_create_event(NULL, false, false, &g_e1);
+    EXPECT(NT_SUCCESS(st), "event e1");
+    st = ob_create_event(NULL, false, false, &g_e2);
+    EXPECT(NT_SUCCESS(st), "event e2");
+    thread_t *t1 = NULL, *t2 = NULL;
+    st = psp_create_thread(psp_system_process(), "ping", ping_fn, NULL, PRIORITY_NORMAL, &t1);
+    EXPECT(NT_SUCCESS(st) && t1, "thread ping");
+    st = psp_create_thread(psp_system_process(), "pong", pong_fn, NULL, PRIORITY_NORMAL, &t2);
+    EXPECT(NT_SUCCESS(st) && t2, "thread pong");
+    kprintf("selftest: entering dispatcher for ping/pong\n");
+    sched_start();
+    EXPECT(g_ping == 2 && g_pong == 1, "thread ping-pong");
 
     kprintf("selftest: all assertions passed\n");
     return 0;

@@ -3,12 +3,14 @@
 **Aegis** hybrid kernel. Bootable x86_64. Objects, handles, NTSTATUS,
 a syscall gate, a panic that dumps registers.
 
-This is an operating system. It is not a web app, not a Linux distro,
-and not a toy "kernel" that `printf`s in ring 3.
+This is an operating system — the same *kind of thing* as Debian, not
+a website, not a Linux distro, and not a toy `printf` in ring 3.
 
 ```
 firmware → Multiboot2 → long mode → Aegis → init → sh
 ```
+
+Clone it. `make`. `make run`. That is how you boot it.
 
 ## Repo
 

@@ -34,6 +34,10 @@ static spinlock_t   g_pmm_lock = SPINLOCK_INIT("pmm", LOCK_RANK_PMM);
 #ifdef JASOS_HOST
 static u8          *g_host_ram;
 #endif
+#ifndef JASOS_HOST
+static bool         g_hhdm_live;
+static phys_t       g_frames_phys;
+#endif
 
 #ifdef JASOS_HOST
 u8 *pmm_host_ram(void) { return g_host_ram; }
@@ -140,8 +144,8 @@ void pmm_init(const mmap_entry_t *map, u32 count, phys_t kphys, u64 ksize)
         }
     }
     if (!meta_phys) panic("pmm: no room for metadata");
-    g_frames = (frame_t *)(HHDM_BASE + meta_phys);
-    /* During early boot HHDM may not exist; identity map covers this. */
+    g_frames_phys = meta_phys;
+    /* Identity still live during pmm_init. vmm_init calls pmm_enter_hhdm. */
     g_frames = (frame_t *)(uintptr_t)meta_phys;
 #endif
 
@@ -237,11 +241,7 @@ phys_t pmm_alloc(u32 order, u32 flags)
     spin_unlock(&g_pmm_lock);
 
     if (flags & PMM_ZERO) {
-#ifdef JASOS_HOST
-        memset((void *)(uintptr_t)pa, 0, (size_t)PAGE_SIZE << order);
-#else
-        memset((void *)(uintptr_t)(HHDM_BASE + pa), 0, (size_t)PAGE_SIZE << order);
-#endif
+        memset(pmm_phys_to_virt(pa), 0, (size_t)PAGE_SIZE << order);
     }
     return pa;
 }
@@ -275,6 +275,24 @@ void pmm_free(phys_t p, u32 order)
 
 u64 pmm_free_pages(void) { return g_free_pages; }
 u64 pmm_total_pages(void) { return g_total_avail; }
+
+void *pmm_phys_to_virt(phys_t pa)
+{
+#ifdef JASOS_HOST
+    return (void *)(uintptr_t)pa;
+#else
+    if (g_hhdm_live) return (void *)(uintptr_t)(HHDM_BASE + pa);
+    return (void *)(uintptr_t)pa;
+#endif
+}
+
+void pmm_enter_hhdm(void)
+{
+#ifndef JASOS_HOST
+    g_hhdm_live = true;
+    g_frames = (frame_t *)(uintptr_t)(HHDM_BASE + g_frames_phys);
+#endif
+}
 
 void pmm_dump(void)
 {

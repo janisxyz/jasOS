@@ -3,6 +3,7 @@
 #include <jasos/kprintf.h>
 #include <jasos/string.h>
 #include <jasos/ke.h>
+#include <jasos/elf.h>
 
 static vnode_t    *g_root_vnode;
 static spinlock_t  g_vfs_lock = SPINLOCK_INIT("vfs", LOCK_RANK_VFS);
@@ -356,6 +357,48 @@ status_t vfs_seed_initrd(void)
     seed_file("/etc/version", JASOS_VERSION_STR "\n");
     seed_file("/usr/share/welcome",
               "Welcome to jasOS.\nThis is an operating system, not a website.\n");
+    seed_file("/bin/sh", "BUILTIN\n");
+    seed_file("/bin/ls", "BUILTIN\n");
+    seed_file("/bin/cat", "BUILTIN\n");
+    seed_file("/bin/echo", "BUILTIN\n");
+    seed_file("/bin/ps", "BUILTIN\n");
+    seed_file("/bin/crash", "BUILTIN\n");
+    {
+        u8 mini[128];
+        u64 n = elf_make_minimal_hello(mini, sizeof(mini));
+        if (n) vfs_write_bytes("/bin/hello", mini, n);
+    }
     kprintf("vfs: initrd /bin /etc /tmp /proc /dev\n");
+    return STATUS_SUCCESS;
+}
+
+status_t vfs_write_bytes(const char *path, const void *data, u64 n)
+{
+    file_object_t *f;
+    status_t st = vfs_open(path, FILE_WRITE_DATA, FILE_OPEN_IF, FILE_NON_DIRECTORY_FILE, &f);
+    if (!NT_SUCCESS(st)) return st;
+    u64 put = 0;
+    st = vfs_write(f, data, n, &put);
+    ob_dereference(&f->hdr);
+    return st;
+}
+
+status_t vfs_read_all(const char *path, u8 **data, u64 *len)
+{
+    if (!path || !data || !len) return STATUS_INVALID_PARAMETER;
+    file_object_t *f;
+    status_t st = vfs_open(path, FILE_READ_DATA, FILE_OPEN, FILE_NON_DIRECTORY_FILE, &f);
+    if (!NT_SUCCESS(st)) return st;
+    vnode_t *v = f->vnode;
+    u8 *buf = kalloc(v->size + 1);
+    if (!buf) {
+        ob_dereference(&f->hdr);
+        return STATUS_NO_MEMORY;
+    }
+    if (v->size && v->data) memcpy(buf, v->data, (size_t)v->size);
+    buf[v->size] = 0;
+    *data = buf;
+    *len = v->size;
+    ob_dereference(&f->hdr);
     return STATUS_SUCCESS;
 }

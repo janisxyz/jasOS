@@ -67,14 +67,42 @@ void sched_ready(thread_t *t)
     spin_unlock(&g_sched_lock);
 }
 
+#ifdef JASOS_HOST
+static jmp_buf g_boot_jmp;
+static int     g_boot_valid;
+#endif
+
+#ifdef JASOS_HOST
+static int live_nonidle(void)
+{
+    for (u32 i = 0; i < g_nprocs; i++) {
+        process_t *p = g_procs[i];
+        if (!p) continue;
+        for (list_t *e = p->threads.next; e != &p->threads; e = e->next) {
+            thread_t *th = CONTAINER_OF(e, thread_t, proc_link);
+            if (th == g_idle) continue;
+            if (th->state == THR_READY || th->state == THR_RUNNING || th->state == THR_WAITING)
+                return 1;
+        }
+    }
+    return 0;
+}
+#endif
+
 static void idle_entry(void *arg)
 {
     (void)arg;
     for (;;) {
 #ifdef JASOS_HOST
-        if (!g_ready_mask) {
+        ke_on_tick();
+        if (!live_nonidle() && g_boot_valid) {
             g_host_stop = true;
-            return;
+            longjmp(g_boot_jmp, 1);
+        }
+        if (ke_ticks() > 1000000ull) {
+            kprintf("sched: host watchdog — abandoning waiters\n");
+            g_host_stop = true;
+            longjmp(g_boot_jmp, 1);
         }
         sched_yield();
 #else
@@ -85,25 +113,36 @@ static void idle_entry(void *arg)
 }
 
 #ifdef JASOS_HOST
+__attribute__((noinline, noclone, used))
 void thread_trampoline(void)
 {
     thread_t *t = ke_current();
-    if (t->ctx.entry) t->ctx.entry(t->ctx.arg);
+    if (t && t->ctx.entry) t->ctx.entry(t->ctx.arg);
     sched_exit_thread(STATUS_SUCCESS);
 }
 
+__attribute__((noinline, noclone))
 void context_switch(context_t *old, context_t *newc)
 {
-    if (old) {
-        if (setjmp(old->buf) != 0) return; /* resumed */
-        old->valid = 1;
-    }
+    thread_t *t = ke_current();
     if (newc->entry && !newc->valid) {
+        if (!t || !t->kstack) panic("context_switch: no kstack");
+        if (getcontext(&newc->uc) != 0) panic("getcontext");
+        newc->uc.uc_stack.ss_sp = t->kstack;
+        newc->uc.uc_stack.ss_size = t->kstack_size;
+        newc->uc.uc_link = NULL;
+        makecontext(&newc->uc, thread_trampoline, 0);
         newc->valid = 1;
-        thread_trampoline();
-        return;
+        __asm__ volatile("" ::: "memory");
     }
-    if (newc->valid) longjmp(newc->buf, 1);
+    if (!newc->valid) panic("context_switch: no frame");
+    __asm__ volatile("" ::: "memory");
+    if (!old) {
+        setcontext(&newc->uc);
+        panic("setcontext returned");
+    }
+    if (swapcontext(&old->uc, &newc->uc) != 0)
+        panic("swapcontext");
 }
 #else
 void thread_trampoline(void)
@@ -137,6 +176,16 @@ void sched_reschedule(void)
     cpu->current = next;
     cpu->current_process = next->process;
     spin_unlock(&g_sched_lock);
+#ifndef JASOS_HOST
+    if (next->kstack) {
+        cpu->kernel_rsp = (u64)(next->kstack + next->kstack_size);
+        tss_set_rsp0(cpu->kernel_rsp);
+    }
+    if (next->process && next->process->aspace.cr3_phys) {
+        u64 cr3 = next->process->aspace.cr3_phys;
+        __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+    }
+#endif
     if (cur) context_switch(&cur->ctx, &next->ctx);
     else     context_switch(NULL, &next->ctx);
 }
@@ -172,6 +221,30 @@ void ke_on_tick(void)
 {
     pcb_t *cpu = ke_pcb();
     cpu->ticks++;
+    timer_tick(cpu->ticks);
+
+    for (u32 i = 0; i < g_nprocs; i++) {
+        process_t *p = g_procs[i];
+        if (!p) continue;
+        list_t *e, *n;
+        LIST_FOR_EACH_SAFE(e, n, &p->threads) {
+            thread_t *th = CONTAINER_OF(e, thread_t, proc_link);
+            if (th->state != THR_WAITING || !th->wait_timed) continue;
+            if (cpu->ticks < th->wait_timeout_tick) continue;
+            dispatcher_t *d = th->wait.object;
+            if (d) {
+                spin_lock(&d->lock);
+                if (th->state == THR_WAITING) {
+                    list_remove(&th->wait.obj_link);
+                    th->wait.wake_status = STATUS_TIMEOUT;
+                    th->wait_timed = false;
+                }
+                spin_unlock(&d->lock);
+            }
+            if (th->state == THR_WAITING) sched_ready(th);
+            cpu->need_resched = true;
+        }
+    }
     thread_t *t = cpu->current;
     if (!t) return;
     if (t->quantum_left && t->priority < PRIORITY_REALTIME) {
@@ -195,7 +268,7 @@ void sched_init(void)
     strlcpy(g_system->image, "System", sizeof(g_system->image));
     g_system->pid = 0;
     list_init(&g_system->threads);
-    spin_init(&g_system->lock, "proc", LOCK_RANK_SCHED);
+    spin_init(&g_system->lock, "proc", LOCK_RANK_PROC);
     ht_init(&g_system->handles);
     vmm_aspace_init(&g_system->aspace);
     disp_init(&g_system->disp, DISP_PROCESS, 0);
@@ -215,16 +288,23 @@ void sched_init(void)
 void sched_start(void)
 {
     g_sched_started = true;
-    ke_pcb()->current = NULL;
     kprintf("sched: dropping boot context\n");
+#ifdef JASOS_HOST
+    g_host_stop = false;
+    if (setjmp(g_boot_jmp) != 0) {
+        ke_pcb()->current = g_idle;
+        ke_pcb()->current_process = g_system;
+        kprintf("sched: host idle — back to boot\n");
+        return;
+    }
+    g_boot_valid = 1;
+#endif
+    ke_pcb()->current = NULL;
     sched_reschedule();
 #ifdef JASOS_HOST
-    /* Cooperative: keep switching until idle sees an empty ready mask. */
+    /* If reschedule never longjmp'd (no idle path), tick until it does. */
     u32 guard = 0;
-    while (!g_host_stop && guard++ < 100000) {
-        ke_on_tick();
-        if (!ke_pcb()->current) break;
-    }
+    while (!g_host_stop && guard++ < 100000) ke_on_tick();
 #endif
 }
 
@@ -242,7 +322,14 @@ status_t psp_create_thread(process_t *p, const char *name, void (*entry)(void *)
     t->saved_priority = prio;
     t->quantum_left = QUANTUM_TICKS;
     t->kstack_size = KSTACK_SIZE;
+#ifdef JASOS_HOST
+    if (posix_memalign((void **)&t->kstack, 16, KSTACK_SIZE) != 0)
+        t->kstack = NULL;
+    else
+        memset(t->kstack, 0, KSTACK_SIZE);
+#else
     t->kstack = kalloc_zero(KSTACK_SIZE);
+#endif
     if (!t->kstack) {
         ob_dereference(&t->hdr);
         return STATUS_NO_MEMORY;
@@ -284,7 +371,7 @@ status_t psp_create_process(const char *image, process_t *parent, process_t **ou
     if (!p) return STATUS_NO_MEMORY;
     p->pid = g_next_pid++;
     list_init(&p->threads);
-    spin_init(&p->lock, "proc", LOCK_RANK_SCHED);
+    spin_init(&p->lock, "proc", LOCK_RANK_PROC);
     ht_init(&p->handles);
     vmm_aspace_init(&p->aspace);
     disp_init(&p->disp, DISP_PROCESS, 0);

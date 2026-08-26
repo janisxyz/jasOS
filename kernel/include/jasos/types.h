@@ -6,10 +6,14 @@
 #include <stdbool.h>
 
 #ifdef JASOS_HOST
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <setjmp.h>
+#include <ucontext.h>
 #endif
 
 typedef uint8_t  u8;

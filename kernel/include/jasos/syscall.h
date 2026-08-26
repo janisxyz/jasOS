@@ -2,6 +2,7 @@
 
 #include <jasos/types.h>
 #include <jasos/status.h>
+#include <jasos/config.h>
 
 #define SYS_NtClose                    0
 #define SYS_NtDuplicateObject          1
@@ -35,7 +36,11 @@
 #define SYS_NtRaiseException           29
 #define SYS_NtGetCwd                   30
 #define SYS_NtSetCwd                   31
-#define SYS_MAX                        32
+#define SYS_NtCreatePipe               32
+#define SYS_NtCreateTimer              33
+#define SYS_NtSetTimer                 34
+#define SYS_NtCancelTimer              35
+#define SYS_MAX                        36
 
 status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 *info);
 
@@ -57,6 +62,24 @@ status_t NtCreateMutex(handle_t *out, const char *name, bool owner);
 status_t NtReleaseMutex(handle_t h);
 status_t NtWaitForSingleObject(handle_t h, u64 timeout_ticks);
 status_t NtRaiseException(status_t code);
+status_t NtResetEvent(handle_t h);
+status_t NtCreateThread(handle_t *out, void (*entry)(void *), void *arg, u32 prio);
+status_t NtAllocateVirtualMemory(handle_t proc, virt_t *base, u64 size, u32 prot);
+status_t NtCreatePipe(handle_t *read_out, handle_t *write_out);
+status_t NtQueryInformationProcess(handle_t h, void *buf, u64 n);
+status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 flags);
+status_t NtTerminateThread(handle_t h, status_t st);
+status_t NtDuplicateObject(handle_t src_proc, handle_t src, handle_t dst_proc, handle_t *out, access_t access);
+status_t NtQueryObject(handle_t h, void *buf, u64 n);
+status_t NtCreateSection(handle_t *out, access_t access, u64 size, u32 prot);
+status_t NtMapViewOfSection(handle_t section, handle_t proc, virt_t *base, u64 size, u32 prot);
+status_t NtUnmapViewOfSection(handle_t proc, virt_t base);
+status_t NtFreeVirtualMemory(handle_t proc, virt_t base, u64 size);
+status_t NtCreateDirectoryObject(handle_t *out, const char *name);
+status_t NtOpenDirectoryObject(handle_t *out, const char *path);
+status_t NtCreateTimer(handle_t *out, const char *name, bool auto_reset);
+status_t NtSetTimer(handle_t h, u64 due_ticks, u64 period);
+status_t NtCancelTimer(handle_t h);
 
 typedef struct sys_process_info {
     kpid_t pid;
@@ -71,3 +94,11 @@ typedef struct sys_mem_info {
     u64 heap_used;
     u64 ticks;
 } sys_mem_info_t;
+
+typedef struct object_basic_information {
+    u32  kind;
+    u64  pointer_count;
+    u64  handle_count;
+    char type_name[32];
+    char name[NAME_MAX];
+} object_basic_information_t;

@@ -86,8 +86,8 @@ corruption.
 `make host` produces `build/jasos-host` and runs it. This is the same
 `mm/`, `ob/`, `ke/`, `fs/` C as the kernel, with `host/hal_host.c`
 providing serial, time, and a fake mmap of 128 MiB. Context switch is
-`setjmp`/`longjmp`. If host tests fail, the kernel is not "probably
-fine".
+`ucontext` (`swapcontext` onto each thread's kstack). If host tests fail,
+the kernel is not "probably fine".
 
 ```
 ./build/jasos-host

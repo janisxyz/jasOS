@@ -113,6 +113,7 @@ void kmain_early(u64 mb2_phys)
     heap_init();
     ob_init();
     io_init();
+    timer_init();
     sched_init();
     vfs_init();
     vfs_seed_initrd();
@@ -120,6 +121,8 @@ void kmain_early(u64 mb2_phys)
     pit_init(TIMER_HZ);
     pic_unmask(0);
     syscall_init();
+    pci_init();
+    kbd_init();
     __asm__ volatile("sti");
 #endif
 

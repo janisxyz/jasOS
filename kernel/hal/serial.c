@@ -17,6 +17,8 @@ ALWAYS_INLINE u8 inb(u16 port)
 
 #define COM SERIAL_COM1
 
+extern int kbd_getchar(void);
+
 void serial_init(void)
 {
     outb(COM + 1, 0x00);    /* disable IRQ */
@@ -54,7 +56,7 @@ void serial_write(const char *s, usize n)
 int serial_poll_char(void)
 {
     if (inb(COM + 5) & 0x01) return (int)inb(COM);
-    return -1;
+    return kbd_getchar();
 }
 
 void console_emit(char c)

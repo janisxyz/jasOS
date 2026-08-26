@@ -7,6 +7,7 @@
 
 #define VNODE_FILE 1
 #define VNODE_DIR  2
+#define VNODE_CHAR 3
 
 typedef struct vnode {
     u32            kind;
@@ -45,6 +46,8 @@ status_t vfs_write(file_object_t *f, const void *buf, u64 n, u64 *put);
 status_t vfs_readdir(file_object_t *f, char *buf, u64 cap, u64 *put, bool restart);
 status_t vfs_stat_path(const char *path, vnode_t **out);
 status_t vfs_unlink(const char *path);
+status_t vfs_read_all(const char *path, u8 **data, u64 *len);
+status_t vfs_write_bytes(const char *path, const void *data, u64 n);
 vnode_t *vfs_root(void);
 status_t vfs_seed_initrd(void);
 void     ramfs_init(vnode_t **root_out);

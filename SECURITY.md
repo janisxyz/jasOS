@@ -16,7 +16,7 @@ closed vs residual.
 | Kernel VA in `NtAllocateVirtualMemory` | reject `> USER_CANONICAL_TOP` |
 | Panic taking the serial lock | `g_panic_in_progress` + kprintf depth; panic prints anyway |
 | Lock rank inversion (heap→pmm, vfs→heap) | drop higher-rank locks before allocating |
-| `sysret` to kernel RIP | documented; gate not yet the user path (kernel-linked v1) |
+| `sysret` to kernel RIP | canonical check in `syscall_entry.S` (`shr 47` / `ud2`) |
 | ELF PT_INTERP / ET_DYN | refused |
 | pid 1 exit | panic `"init died"` — no "return to firmware" lie |
 
@@ -24,14 +24,15 @@ closed vs residual.
 
 | Residual | Why it still exists | Mitigation |
 |---|---|---|
-| Kernel-linked userland | ELF user programs are loaded by `elf_load` but init/sh are linked into the kernel for v1 so we have a shell the day the box boots | Treat sh as ring 0. Do not ship this as a security boundary. Next: user CR3 + syscall gate. |
-| No SMEP/SMAP | HAL does not set CR4.SMEP/SMAP | Gate not live; once it is, set both before `sti` |
+| Kernel-linked userland | ELF user programs are loaded by `elf_load` but init/sh are linked into the kernel for v1 so we have a shell the day the box boots | Treat sh as ring 0. Do not ship this as a security boundary. Hardware path: user CR3 + `enter_user` + syscall/sysret. |
+| No SMEP/SMAP | HAL does not set CR4.SMEP/SMAP | Set both before first `enter_user` |
 | No KASLR | kernel at `0xFFFFFFFF80000000` | Fine until we have a UEFI stub with entropy |
-| FXSAVE missing | SSE from user clobbers kernel XMM | Kernel built `-mno-sse`; do not enable the gate until FXSAVE |
+| FXSAVE missing | SSE from user clobbers kernel XMM | Kernel built `-mno-sse`; do not enable XMM in user until FXSAVE |
 | VAD array 64 | a mapping bomb fails closed with `INSUFFICIENT_RESOURCES` | fail closed is the mitigation |
 | Recursive PML4 | if a user map ever got slot 510, they own page tables | `vmm_map` of user aspace copies kernel half from template; user `NtMap` rejects high VA |
 | Host `copyin` is memcpy | host HAL is not a security boundary | hardware path probes PTEs |
 | Admin == kernel | Token is a field, not an object | do not claim otherwise |
+| ELF memcpy via parent CR3 | closed: `vmm_write_aspace` copies through HHDM / host_shadow | — |
 
 ## Panic path contract
 

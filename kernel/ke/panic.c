@@ -57,8 +57,15 @@ void NORETURN panic(const char *fmt, ...)
                 g_bsp.current->name,
                 g_bsp.current_process ? (unsigned long long)g_bsp.current_process->pid : 0ULL);
     }
-    kprintf("ticks %llu irql %u held_rank %u\n",
-            (unsigned long long)g_bsp.ticks, g_bsp.irql, g_bsp.held_rank);
+    kprintf("ticks %llu irql %u held_rank %u depth %u\n",
+            (unsigned long long)g_bsp.ticks, g_bsp.irql,
+            g_bsp.held_rank, g_bsp.held_depth);
+    if (g_bsp.held_depth) {
+        kprintf("rank stack:");
+        for (u32 i = 0; i < g_bsp.held_depth && i < LOCK_DEPTH_MAX; i++)
+            kprintf(" %u", g_bsp.rank_stack[i]);
+        kprintf("\n");
+    }
     kprintf("why: ");
     va_start(ap, fmt);
     kvprintf(fmt, ap);

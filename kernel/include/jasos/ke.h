@@ -5,6 +5,7 @@
 #include <jasos/status.h>
 #include <jasos/ob.h>
 #include <jasos/mm.h>
+#include <jasos/syscall.h>
 
 typedef enum thread_state {
     THR_UNUSED = 0,
@@ -15,11 +16,12 @@ typedef enum thread_state {
 } thread_state_t;
 
 #ifdef JASOS_HOST
+#include <ucontext.h>
 typedef struct context {
-    jmp_buf buf;
-    int     valid;
-    void  (*entry)(void *);
-    void   *arg;
+    ucontext_t uc;
+    int        valid;
+    void     (*entry)(void *);
+    void      *arg;
 } context_t;
 #else
 typedef struct context {
@@ -60,7 +62,6 @@ typedef struct thread {
     list_t            timer_link;
     status_t          exit_status;
     char              name[32];
-    /* syscall scratch */
     status_t          last_status;
 } thread_t;
 
@@ -79,16 +80,30 @@ typedef struct process {
     char           cwd[PATH_MAX];
     u32            thread_count;
     handle_t       std_in, std_out, std_err;
+    virt_t         user_entry;
+    virt_t         user_stack;
+    int          (*builtin)(int argc, char **argv);
+    bool           user_mode;
 } process_t;
 
+/*
+ * Layout is ABI for syscall_entry.S:
+ *   +0  kernel_rsp
+ *   +8  user_rsp
+ * Do not reorder the first two fields.
+ */
 typedef struct pcb {
-    thread_t *current;
+    u64        kernel_rsp;
+    u64        user_rsp;
+    thread_t  *current;
     process_t *current_process;
-    thread_t *idle;
-    u32       irql;
-    u32       held_rank;
-    bool      need_resched;
-    u64       ticks;
+    thread_t  *idle;
+    u32        irql;
+    u32        held_rank;
+    u32        held_depth;
+    u32        rank_stack[LOCK_DEPTH_MAX];
+    bool       need_resched;
+    u64        ticks;
 } pcb_t;
 
 void      ke_init(void);
@@ -97,7 +112,7 @@ thread_t *ke_current(void);
 process_t *ke_current_process(void);
 
 void      sched_init(void);
-void      sched_start(void); /* does not return on hardware; returns on host when idle+no ready */
+void      sched_start(void);
 void      sched_ready(thread_t *t);
 void      sched_yield(void);
 void      sched_reschedule(void);
@@ -109,6 +124,7 @@ status_t  psp_create_process(const char *image, process_t *parent, process_t **o
 status_t  psp_create_thread(process_t *p, const char *name, void (*entry)(void *), void *arg, u32 prio, thread_t **out);
 status_t  psp_create_init(void);
 process_t *psp_system_process(void);
+u32       psp_snapshot(sys_process_info_t *buf, u32 max);
 
 status_t  ke_wait_object(dispatcher_t *d, u64 timeout_ticks);
 status_t  ke_set_event(event_object_t *e);
@@ -118,14 +134,30 @@ status_t  ke_acquire_mutex(mutex_object_t *m, u64 timeout_ticks);
 
 void      context_switch(context_t *old, context_t *newc);
 void      thread_trampoline(void);
+void      enter_user(virt_t rip, virt_t rsp, u64 rflags);
 
 void      gdt_init(void);
 void      idt_init(void);
 void      tss_init(void);
+void      tss_set_rsp0(u64 rsp);
 void      pic_remap(u8 off1, u8 off2);
 void      pic_unmask(u8 irq);
 void      pit_init(u32 hz);
 void      syscall_init(void);
+void      pci_init(void);
+void      kbd_init(void);
+int       kbd_getchar(void);
+void      kbd_isr(void);
+status_t  syscall_from_entry(u64 *frame);
+
+void      timer_init(void);
+void      timer_tick(u64 now);
+status_t  ob_create_timer(const char *name, bool auto_reset, timer_object_t **out);
+status_t  ke_set_timer(timer_object_t *t, u64 due_ticks, u64 period);
+status_t  ke_cancel_timer(timer_object_t *t);
+
+int       builtin_lookup(const char *path, int (**mainfn)(int, char **));
+status_t  psp_exec_image(process_t *p, const u8 *image, u64 len, virt_t *entry_out);
 
 extern volatile bool g_panic_in_progress;
 extern volatile bool g_sched_started;

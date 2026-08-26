@@ -5,6 +5,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
+#include <execinfo.h>
+#include <unistd.h>
 
 static int g_selftest;
 static int g_shell;
@@ -23,8 +26,23 @@ void host_build_mmap(mmap_entry_t *map, u32 *count)
 
 void kmain_early(u64 mb2);
 
+static void on_fault(int sig)
+{
+    void *bt[32];
+    int n;
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "\n*** host signal %d ***\n", sig);
+    (void)!write(2, buf, (size_t)len);
+    n = backtrace(bt, 32);
+    backtrace_symbols_fd(bt, n, 2);
+    _exit(128 + sig);
+}
+
 int main(int argc, char **argv)
 {
+    signal(SIGSEGV, on_fault);
+    signal(SIGABRT, on_fault);
+    signal(SIGBUS, on_fault);
     g_selftest = 1;
     g_shell = 0;
     for (int i = 1; i < argc; i++) {
@@ -36,7 +54,6 @@ int main(int argc, char **argv)
             return 0;
         }
     }
-    /* Default with no args: selftest, matching `make host`. */
     if (argc == 1) g_selftest = 1;
     kmain_early(0);
     return 0;

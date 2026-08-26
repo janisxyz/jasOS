@@ -178,4 +178,8 @@ See [BUILD.md](BUILD.md).
 | T0 | GAS, not NASM | One less tool on Windows/WSL |
 | T0 | NTSTATUS, not errno | The audience is a Windows systems engineer |
 | T1 | Drop heap/VFS locks before PMM/kalloc | Rank inversion panics were correct; the call graph was wrong |
-| T1 | Mutex release requires owner AND recursion>0 | NULL current was succeeding a release |
+| T2 | Handle value is `index<<2`, not `(index<<2)\|4` | The tag bit sat in the index field; two handles in one table collided |
+| T4 | Host threads switch onto their kstack | Shared boot-stack trampoline smashed wait frames (ping/pong) |
+| T4 | `pmm_enter_hhdm` after CR3 load | Frame metadata was identity-mapped; post-vmm accesses would #PF |
+| T4 | ELF load copies through `vmm_write_aspace` | memcpy to user VA from the parent CR3 is a #PF |
+| T4 | Scheduler loads CR3 + TSS.RSP0 on switch | User processes otherwise ran in the kernel aspace |

@@ -30,6 +30,8 @@ void  pmm_free(phys_t p, u32 order);
 u64   pmm_free_pages(void);
 u64   pmm_total_pages(void);
 void  pmm_dump(void);
+void  pmm_enter_hhdm(void);
+void *pmm_phys_to_virt(phys_t pa);
 
 #define PTE_P    (1ULL << 0)
 #define PTE_W    (1ULL << 1)
@@ -60,6 +62,9 @@ typedef struct aspace {
     u32        vad_count;
     virt_t     brk;
     virt_t     stack_base;
+#ifdef JASOS_HOST
+    u8     *host_shadow[MAX_VADS];
+#endif
 } aspace_t;
 
 void   vmm_init(phys_t kphys, u64 ksize);
@@ -70,6 +75,8 @@ status_t vmm_unmap(aspace_t *as, virt_t va, u64 n_pages);
 status_t vmm_alloc_user(struct process *p, virt_t *base, u64 size, u32 prot, u32 type);
 status_t vmm_free_user(struct process *p, virt_t base, u64 size);
 bool   vmm_probe_user(aspace_t *as, virt_t va, u64 n, bool write);
+status_t vmm_write_aspace(aspace_t *as, virt_t va, const void *src, u64 n);
+status_t vmm_read_aspace(aspace_t *as, void *dst, virt_t va, u64 n);
 status_t copyin(void *kdst, virt_t usrc, u64 n);
 status_t copyout(virt_t udst, const void *ksrc, u64 n);
 status_t copyinstr(char *kdst, virt_t usrc, u64 cap);

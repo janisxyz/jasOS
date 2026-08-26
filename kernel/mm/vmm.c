@@ -190,6 +190,7 @@ void vmm_init(phys_t kphys, u64 ksize)
     pml4[RECURSIVE_SLOT] = cr3 | PTE_P | PTE_W;
 
     __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+    pmm_enter_hhdm();
     g_kernel_as.cr3_phys = cr3;
     spin_init(&g_kernel_as.lock, "kas", LOCK_RANK_VMM);
     kprintf("vmm: cr3=%llx hhdm 4GiB kernel %llx+%llx\n",
@@ -319,12 +320,20 @@ status_t vmm_alloc_user(process_t *p, virt_t *base, u64 size, u32 prot, u32 type
         status_t st = vmm_map(as, va + i * PAGE_SIZE, pa, 1, flags);
         if (!NT_SUCCESS(st)) return st;
     }
-    vad_t *v = &as->vads[as->vad_count++];
+    vad_t *v = &as->vads[as->vad_count];
+#ifdef JASOS_HOST
+    as->host_shadow[as->vad_count] = kalloc_zero(size);
+    if (!as->host_shadow[as->vad_count]) {
+        vmm_unmap(as, va, pages);
+        return STATUS_NO_MEMORY;
+    }
+#endif
     v->start = va;
     v->end = va + size;
     v->prot = prot;
     v->type = type;
     v->committed = 1;
+    as->vad_count++;
     *base = va;
     return STATUS_SUCCESS;
 }
@@ -337,9 +346,90 @@ status_t vmm_free_user(process_t *p, virt_t base, u64 size)
     for (u32 i = 0; i < as->vad_count; i++) {
         if (as->vads[i].start == base) {
             vmm_unmap(as, base, size / PAGE_SIZE);
+#ifdef JASOS_HOST
+            kfree(as->host_shadow[i]);
+            as->host_shadow[i] = as->host_shadow[as->vad_count - 1];
+            as->host_shadow[as->vad_count - 1] = NULL;
+#endif
             as->vads[i] = as->vads[--as->vad_count];
             return STATUS_SUCCESS;
         }
     }
     return STATUS_INVALID_PARAMETER;
+}
+
+status_t vmm_write_aspace(aspace_t *as, virt_t va, const void *src, u64 n)
+{
+    if (!as || !src || n == 0) return STATUS_INVALID_PARAMETER;
+    const u8 *s = src;
+#ifdef JASOS_HOST
+    while (n) {
+        u32 hit = (u32)-1;
+        for (u32 i = 0; i < as->vad_count; i++) {
+            if (va >= as->vads[i].start && va < as->vads[i].end) {
+                hit = i;
+                break;
+            }
+        }
+        if (hit == (u32)-1 || !as->host_shadow[hit]) return STATUS_ACCESS_VIOLATION;
+        u64 off = va - as->vads[hit].start;
+        u64 chunk = MIN(n, as->vads[hit].end - va);
+        memcpy(as->host_shadow[hit] + off, s, (size_t)chunk);
+        va += chunk;
+        s += chunk;
+        n -= chunk;
+    }
+    return STATUS_SUCCESS;
+#else
+    while (n) {
+        u64 *pte = walk_alloc(as->cr3_phys, PAGE_ALIGN_DOWN(va), false);
+        if (!pte || !(*pte & PTE_P)) return STATUS_ACCESS_VIOLATION;
+        phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
+        u64 off = va & PAGE_MASK;
+        u64 chunk = MIN(n, PAGE_SIZE - off);
+        memcpy((u8 *)pmm_phys_to_virt(pa) + off, s, (size_t)chunk);
+        va += chunk;
+        s += chunk;
+        n -= chunk;
+    }
+    return STATUS_SUCCESS;
+#endif
+}
+
+status_t vmm_read_aspace(aspace_t *as, void *dst, virt_t va, u64 n)
+{
+    if (!as || !dst || n == 0) return STATUS_INVALID_PARAMETER;
+    u8 *d = dst;
+#ifdef JASOS_HOST
+    while (n) {
+        u32 hit = (u32)-1;
+        for (u32 i = 0; i < as->vad_count; i++) {
+            if (va >= as->vads[i].start && va < as->vads[i].end) {
+                hit = i;
+                break;
+            }
+        }
+        if (hit == (u32)-1 || !as->host_shadow[hit]) return STATUS_ACCESS_VIOLATION;
+        u64 off = va - as->vads[hit].start;
+        u64 chunk = MIN(n, as->vads[hit].end - va);
+        memcpy(d, as->host_shadow[hit] + off, (size_t)chunk);
+        va += chunk;
+        d += chunk;
+        n -= chunk;
+    }
+    return STATUS_SUCCESS;
+#else
+    while (n) {
+        u64 *pte = walk_alloc(as->cr3_phys, PAGE_ALIGN_DOWN(va), false);
+        if (!pte || !(*pte & PTE_P)) return STATUS_ACCESS_VIOLATION;
+        phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
+        u64 off = va & PAGE_MASK;
+        u64 chunk = MIN(n, PAGE_SIZE - off);
+        memcpy(d, (u8 *)pmm_phys_to_virt(pa) + off, (size_t)chunk);
+        va += chunk;
+        d += chunk;
+        n -= chunk;
+    }
+    return STATUS_SUCCESS;
+#endif
 }

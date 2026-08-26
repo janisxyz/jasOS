@@ -3,9 +3,9 @@
 #include <jasos/types.h>
 
 #define JASOS_VERSION_MAJOR  0
-#define JASOS_VERSION_MINOR  1
+#define JASOS_VERSION_MINOR  5
 #define JASOS_VERSION_PATCH  0
-#define JASOS_VERSION_STR    "0.1.0-aegis"
+#define JASOS_VERSION_STR    "0.5.0-aegis"
 
 #define PAGE_SHIFT           12u
 #define PAGE_SIZE            (1u << PAGE_SHIFT)
@@ -35,9 +35,13 @@
 #define HEAP_CLASSES         9u
 
 #define HANDLE_TABLE_SLOTS   1024u
-#define HANDLE_VALUE(i)      (((handle_t)(i) << 2) | 0x4ULL)
+#define HANDLE_VALUE(i)      ((handle_t)(i) << 2)
 #define HANDLE_INDEX(h)      ((u32)((h) >> 2))
 #define HANDLE_CURRENT       ((handle_t)-1)
+
+#define STD_INPUT_HANDLE     HANDLE_VALUE(1)
+#define STD_OUTPUT_HANDLE    HANDLE_VALUE(2)
+#define STD_ERROR_HANDLE     HANDLE_VALUE(3)
 
 #define PRIORITY_LEVELS      32u
 #define PRIORITY_IDLE        0u
@@ -56,10 +60,21 @@
 #define MAX_PROCESSES        64u
 #define MAX_THREADS          256u
 #define MAX_VADS             64u
+#define LOCK_DEPTH_MAX       8u
 
 #define SERIAL_COM1          0x3F8u
 #define SERIAL_BAUD          115200u
 
+/*
+ * Lock ranking. Acquire only a STRICTLY HIGHER rank while holding one.
+ * Nested ranks are stacked on the PCB; unlock restores the previous.
+ *
+ * DISP < SCHED is mandatory: wait/signal holds the object dispatcher
+ * then inserts the woken thread on a ready queue.
+ *
+ * T3 reversal: v0.3 had SCHED=8 DISP=9. ping/pong paniced
+ * "lock rank 8 (sched) while holding 9". Swapped and stacked.
+ */
 #define LOCK_RANK_PANIC      0u
 #define LOCK_RANK_SERIAL     1u
 #define LOCK_RANK_PMM        2u
@@ -68,9 +83,10 @@
 #define LOCK_RANK_VAD        5u
 #define LOCK_RANK_OB         6u
 #define LOCK_RANK_HANDLE     7u
-#define LOCK_RANK_SCHED      8u
+#define LOCK_RANK_PROC       8u
 #define LOCK_RANK_DISP       9u
-#define LOCK_RANK_VFS        10u
+#define LOCK_RANK_SCHED      10u
+#define LOCK_RANK_VFS        11u
 
 #define IRQL_PASSIVE         0u
 #define IRQL_APC             1u
@@ -115,6 +131,10 @@
 #define EVENT_MODIFY_STATE       0x0002u
 #define MUTEX_MODIFY_STATE       0x0001u
 #define TIMER_MODIFY_STATE       0x0002u
+#define SECTION_MAP_WRITE        0x0002u
+#define SECTION_MAP_READ         0x0004u
+#define SECTION_MAP_EXECUTE      0x0008u
+#define SECTION_ALL_ACCESS       0x1FFFFu
 
 #define FILE_OPEN                1u
 #define FILE_CREATE              2u
@@ -132,3 +152,6 @@
 #define PAGE_EXECUTE             0x10u
 #define PAGE_EXECUTE_READ        0x20u
 #define PAGE_EXECUTE_READWRITE   0x40u
+
+#define CREATE_SUSPENDED         0x00000001u
+#define CREATE_NO_IMAGE          0x00000002u

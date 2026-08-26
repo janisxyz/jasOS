@@ -98,3 +98,18 @@ status_t ht_close(handle_table_t *t, handle_t h)
     ob_dereference(o);
     return STATUS_SUCCESS;
 }
+
+status_t ht_duplicate(handle_table_t *src, handle_t h, handle_table_t *dst, access_t access, handle_t *out)
+{
+    if (!src || !dst || !out) return STATUS_INVALID_PARAMETER;
+    object_t *o;
+    status_t st = ht_lookup(src, h, 0, 0, &o);
+    if (!NT_SUCCESS(st)) return st;
+    if (access == 0) {
+        u32 i = HANDLE_INDEX(h);
+        access = src->slots[i].access;
+    }
+    st = ht_insert(dst, o, access, out);
+    ob_dereference(o);
+    return st;
+}
