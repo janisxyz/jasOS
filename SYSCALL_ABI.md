@@ -123,9 +123,25 @@ Max copyin size v1: 1 MiB. Bigger is `STATUS_INVALID_PARAMETER`.
 | 27 | `NtCreateDirectoryObject` | out | access | path | | |
 | 28 | `NtOpenDirectoryObject` | out | access | path | | |
 | 29 | `NtRaiseException` | code | | | | |
+| 30 | `NtGetCwd` | buf | cap | | | |
+| 31 | `NtSetCwd` | path | | | | |
+| 32 | `NtCreatePipe` | out read | out write | | | |
+| 33 | `NtCreateTimer` | out | name | auto | | |
+| 34 | `NtSetTimer` | handle | due ticks | period | | |
+| 35 | `NtCancelTimer` | handle | | | | |
+| 36 | `NtWaitForMultipleObjects` | handles | count | wait_all | timeout | |
 
-`-1` as a process/thread handle means current. It is not a real handle
-value (real handles are `index<<2` with bit 2 set, never all-ones).
+`-1` as a process/thread handle means current. Real handles are
+`(generation << 16) | (index << 2)`, never all-ones.
+
+## Marshalling (T6)
+
+`syscall_dispatch` never hands a user pointer to an `Nt*` implementation
+when `process->user_mode` is set. Paths go through `copyinstr`. Buffers
+bounce through `kalloc` capped at `SYSCALL_COPY_MAX` (64 KiB). Out-handles
+go through `copyout`. `NtAllocateVirtualMemory` / `NtMapViewOfSection`
+copy the inout `base`. Kernel-linked builtins (`user_mode == 0`) still
+pass host pointers; that is the host HAL, not a security boundary.
 
 ## Security notes (locked)
 
@@ -139,3 +155,8 @@ value (real handles are `index<<2` with bit 2 set, never all-ones).
 ## Reversal log
 
 none.
+
+T6: handle encoding grew a generation field. Syscall numbers 30–36
+are live. User `NtCreateThread` a1 is a user RIP stored on the TCB,
+never called in kernel.
+

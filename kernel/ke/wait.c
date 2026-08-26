@@ -114,3 +114,104 @@ status_t ke_acquire_mutex(mutex_object_t *m, u64 timeout_ticks)
 {
     return ke_wait_object(&m->disp, timeout_ticks);
 }
+
+/*
+ * WaitForMultipleObjects. Enqueues a wait_block on every object so a
+ * signal on any of them wakes us (WAIT_ANY) or we recheck after each
+ * wake for WAIT_ALL. Never holds two DISP locks at once — enqueue
+ * one object at a time. Double-wake is absorbed by sched_ready.
+ *
+ * Why this will fail in production:
+ *  - WAIT_ALL consumes objects in a second pass with timeout 0; a
+ *    concurrent waiter can steal a sync event between the wake and
+ *    the consume. NT has the same class of race without a rundown.
+ *  - 16-object cap. A 17th handle fails closed.
+ */
+status_t ke_wait_multiple(dispatcher_t **objs, u32 count, bool wait_all, u64 timeout_ticks)
+{
+    if (!objs || count == 0 || count > WAIT_OBJECTS_MAX)
+        return STATUS_INVALID_PARAMETER;
+    thread_t *t = ke_current();
+    if (!t) return STATUS_INVALID_PARAMETER;
+
+    for (u32 i = 0; i < count; i++)
+        if (!objs[i]) return STATUS_INVALID_PARAMETER;
+
+    /* Fast path: already satisfied. One DISP at a time. */
+    if (!wait_all) {
+        for (u32 i = 0; i < count; i++) {
+            status_t st = ke_wait_object(objs[i], 0);
+            if (st != STATUS_TIMEOUT)
+                return (st == STATUS_SUCCESS) ? (status_t)i : st;
+        }
+    } else {
+        u32 got = 0;
+        for (u32 i = 0; i < count; i++) {
+            spin_lock(&objs[i]->lock);
+            if (objs[i]->signal_state > 0) got++;
+            spin_unlock(&objs[i]->lock);
+        }
+        if (got == count) {
+            for (u32 i = 0; i < count; i++)
+                ke_wait_object(objs[i], 0);
+            return STATUS_SUCCESS;
+        }
+    }
+    if (timeout_ticks == 0) return STATUS_TIMEOUT;
+
+    t->wait_multi_count = count;
+    t->wait_all = wait_all;
+    t->wait.wake_status = STATUS_TIMEOUT;
+    t->wait.thread = t;
+    t->wait.object = objs[0];
+
+    for (u32 i = 0; i < count; i++) {
+        t->wait_multi[i].thread = t;
+        t->wait_multi[i].object = objs[i];
+        t->wait_multi[i].wake_status = STATUS_TIMEOUT;
+        list_init(&t->wait_multi[i].obj_link);
+        list_init(&t->wait_multi[i].thr_link);
+        spin_lock(&objs[i]->lock);
+        if (!wait_all && objs[i]->signal_state > 0) {
+            spin_unlock(&objs[i]->lock);
+            for (u32 j = 0; j < i; j++) {
+                spin_lock(&objs[j]->lock);
+                list_remove(&t->wait_multi[j].obj_link);
+                spin_unlock(&objs[j]->lock);
+            }
+            t->wait_multi_count = 0;
+            t->wait.object = NULL;
+            /* consume the signaled one */
+            ke_wait_object(objs[i], 0);
+            return (status_t)i;
+        }
+        list_insert_tail(&objs[i]->wait_list, &t->wait_multi[i].obj_link);
+        spin_unlock(&objs[i]->lock);
+    }
+
+    t->state = THR_WAITING;
+    t->wait_timed = (timeout_ticks != (u64)-1);
+    t->wait_timeout_tick = ke_ticks() + (timeout_ticks == (u64)-1 ? 0 : timeout_ticks);
+    sched_reschedule();
+
+    u32 which = 0;
+    for (u32 i = 0; i < count; i++) {
+        spin_lock(&objs[i]->lock);
+        list_remove(&t->wait_multi[i].obj_link);
+        if (t->wait_multi[i].wake_status != STATUS_TIMEOUT)
+            which = i;
+        t->wait_multi[i].object = NULL;
+        spin_unlock(&objs[i]->lock);
+    }
+    t->wait_multi_count = 0;
+    t->wait.object = NULL;
+
+    if (t->wait.wake_status == STATUS_TIMEOUT)
+        return STATUS_TIMEOUT;
+    if (wait_all) {
+        for (u32 i = 0; i < count; i++)
+            ke_wait_object(objs[i], 0);
+        return STATUS_SUCCESS;
+    }
+    return (status_t)which;
+}

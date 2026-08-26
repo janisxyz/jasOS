@@ -223,7 +223,21 @@ int sh_main(int argc, char **argv)
                 } else if (strcmp(av[0], "exit") == 0) {
                     return 0;
                 } else {
-                    kprintf("sh: %s: not found\n", av[0]);
+                    char path[PATH_MAX];
+                    if (av[0][0] == '/' || av[0][0] == '\\')
+                        strlcpy(path, av[0], PATH_MAX);
+                    else {
+                        strlcpy(path, "/bin/", PATH_MAX);
+                        strlcat(path, av[0], PATH_MAX);
+                    }
+                    handle_t ph = 0;
+                    status_t st = NtCreateProcess(&ph, PROCESS_ALL_ACCESS, path, 0);
+                    if (!NT_SUCCESS(st))
+                        kprintf("sh: %s: %s\n", av[0], status_name(st));
+                    else {
+                        NtWaitForSingleObject(ph, (u64)-1);
+                        NtClose(ph);
+                    }
                 }
             }
             linelen = 0;

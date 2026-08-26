@@ -32,6 +32,7 @@ static tss_t       tss;
 static u8          ist1[4096] ALIGNED(16);
 static u8          ist2[4096] ALIGNED(16);
 static u8          ist3[4096] ALIGNED(16);
+static u8          ist4[16384] ALIGNED(16);
 
 static void gdt_set(int i, u32 base, u32 limit, u8 access, u8 gran)
 {
@@ -76,6 +77,7 @@ void tss_init(void)
     tss.ist[0] = (u64)(ist1 + sizeof(ist1));
     tss.ist[1] = (u64)(ist2 + sizeof(ist2));
     tss.ist[2] = (u64)(ist3 + sizeof(ist3));
+    tss.ist[3] = (u64)(ist4 + sizeof(ist4));
     tss.iomap = sizeof(tss);
     u64 b = (u64)&tss;
     gdt_set(5, (u32)b, sizeof(tss) - 1, 0x89, 0);
@@ -83,7 +85,8 @@ void tss_init(void)
     gdt[6].limit_low = (u16)(b >> 32);
     gdt[6].base_low  = (u16)(b >> 48);
     __asm__ volatile("ltr %0" :: "r"((u16)0x28));
-    kprintf("tss: IST1-3 armed for DF/NMI/MC\n");
+    kprintf("tss: IST1=#DF IST2=NMI IST3=#MC IST4=irq %u bytes\n",
+            (unsigned)sizeof(ist4));
 }
 
 void tss_set_rsp0(u64 rsp)

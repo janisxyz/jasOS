@@ -183,3 +183,21 @@ See [BUILD.md](BUILD.md).
 | T4 | `pmm_enter_hhdm` after CR3 load | Frame metadata was identity-mapped; post-vmm accesses would #PF |
 | T4 | ELF load copies through `vmm_write_aspace` | memcpy to user VA from the parent CR3 is a #PF |
 | T4 | Scheduler loads CR3 + TSS.RSP0 on switch | User processes otherwise ran in the kernel aspace |
+| T6 | IST4 for every IRQ/exc | Kernel PIT tick is same-CPL; without IST the CPU omits ss/rsp and the frame lies |
+| T6 | Handle = `(gen<<16)|(index<<2)` | Slot reuse after close accepted a stale handle; generation is the lock |
+| T6 | Hardware `copyin` walks PTEs, copies via HHDM | STAC+user-VA memcpy is a SMAP hole waiting to happen; HHDM never needs STAC |
+| T6 | User `NtCreateThread` parks RIP on the TCB | Calling a user VA from `thread_trampoline` is ring-0 user code. SMEP would #PF it; we refuse to try |
+| T6 | Last-thread exit drops aspace + handle table | Leaked user frames and named objects. Rank: drop PROC before VMM/HANDLE |
+
+---
+
+## T6 surface (0.6.0)
+
+- Trap frames always have ss/rsp/rflags/cs/rip (IST4 16 KiB IRQ stack).
+- SMEP/SMAP set from CPUID before `sti`.
+- Syscall bounce buffers for every user pointer (`SYSCALL_COPY_MAX` 64 KiB).
+- `NtWaitForMultipleObjects` WAIT_ANY/WAIT_ALL, max 16.
+- `NtQueryVirtualMemory` walks VADs.
+- Pipe last-writer EOF via `object_type.close_fn`.
+- `/dev/console` CHAR vnode. User ELF `/bin/hello` at 0x400000 with ntdll + libc printf/malloc.
+- Kernel stack canary page (0xA5). Hardware unmapped kstack VA is residual — heap pages cannot punch a not-present hole.

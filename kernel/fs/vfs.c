@@ -4,6 +4,14 @@
 #include <jasos/string.h>
 #include <jasos/ke.h>
 #include <jasos/elf.h>
+#include <jasos/config.h>
+
+#if defined(__has_include)
+#  if __has_include("hello_blob.h")
+#    include "hello_blob.h"
+#    define HAVE_HELLO_BLOB 1
+#  endif
+#endif
 
 static vnode_t    *g_root_vnode;
 static spinlock_t  g_vfs_lock = SPINLOCK_INIT("vfs", LOCK_RANK_VFS);
@@ -215,6 +223,18 @@ status_t vfs_read(file_object_t *f, void *buf, u64 n, u64 *got)
     if (!(f->access & FILE_READ_DATA) && !(f->access & GENERIC_READ))
         return STATUS_ACCESS_DENIED;
     vnode_t *v = f->vnode;
+    if (v->kind == VNODE_CHAR) {
+        u64 nread = 0;
+        for (u64 i = 0; i < n; i++) {
+            int c = serial_poll_char();
+            if (c < 0) break;
+            ((char *)buf)[i] = (char)c;
+            nread++;
+            if (c == '\n') { i++; break; }
+        }
+        if (got) *got = nread;
+        return nread ? STATUS_SUCCESS : STATUS_END_OF_FILE;
+    }
     if (v->kind != VNODE_FILE) return STATUS_INVALID_PARAMETER;
     spin_lock(&v->lock);
     u64 off = f->offset;
@@ -238,6 +258,12 @@ status_t vfs_write(file_object_t *f, const void *buf, u64 n, u64 *put)
         !(f->access & GENERIC_WRITE))
         return STATUS_ACCESS_DENIED;
     vnode_t *v = f->vnode;
+    if (v->kind == VNODE_CHAR) {
+        const char *s = buf;
+        for (u64 i = 0; i < n; i++) serial_putchar(s[i]);
+        if (put) *put = n;
+        return STATUS_SUCCESS;
+    }
     if (v->kind != VNODE_FILE) return STATUS_FILE_IS_A_DIRECTORY;
     spin_lock(&v->lock);
     u64 off = (f->access & FILE_APPEND_DATA) ? v->size : f->offset;
@@ -349,6 +375,14 @@ status_t vfs_seed_initrd(void)
     vfs_mkdir("/dev");
     vfs_mkdir("/usr");
     vfs_mkdir("/usr/share");
+    {
+        vnode_t *parent, *v;
+        char leaf[NAME_MAX];
+        if (NT_SUCCESS(walk("/dev", &parent, &v, leaf, true)) && v) {
+            vnode_t *con = vn_alloc("console", VNODE_CHAR);
+            if (con) vn_attach(v, con);
+        }
+    }
     seed_file("/etc/motd",
               "jasOS Aegis " JASOS_VERSION_STR "\n"
               "hybrid kernel — objects, handles, NTSTATUS\n"
@@ -364,9 +398,16 @@ status_t vfs_seed_initrd(void)
     seed_file("/bin/ps", "BUILTIN\n");
     seed_file("/bin/crash", "BUILTIN\n");
     {
-        u8 mini[128];
-        u64 n = elf_make_minimal_hello(mini, sizeof(mini));
-        if (n) vfs_write_bytes("/bin/hello", mini, n);
+#ifdef HAVE_HELLO_BLOB
+        if (hello_elf_blob_len > 64)
+            vfs_write_bytes("/bin/hello", hello_elf_blob, hello_elf_blob_len);
+        else
+#endif
+        {
+            u8 mini[128];
+            u64 n = elf_make_minimal_hello(mini, sizeof(mini));
+            if (n) vfs_write_bytes("/bin/hello", mini, n);
+        }
     }
     kprintf("vfs: initrd /bin /etc /tmp /proc /dev\n");
     return STATUS_SUCCESS;

@@ -1,3 +1,14 @@
+/*
+ * Interrupt stubs. Every gate uses an IST (see idt.c) so the CPU
+ * always pushes a 5-word iretq frame even when we interrupt kernel
+ * mode — the v0.5 path assumed a user frame and triple-faulted on
+ * the first PIT tick in idle.
+ *
+ * Why this will still fail in production:
+ *  - One IST for IRQs. Nested IRQ with IF set smashes it. We keep
+ *    interrupt gates (IF cleared).
+ *  - No CR2 in the hardware frame; C reads CR2 for #PF.
+ */
     .intel_syntax noprefix
     .text
     .extern isr_dispatch
@@ -65,6 +76,11 @@ isr_stub_table:
     .quad isr_stub_28, isr_stub_29, isr_stub_30, isr_stub_31
     .quad isr_stub_32, isr_stub_33
 
+/*
+ * Stack on entry to isr_common (IST):
+ *   [ss][rsp][rflags][cs][rip][error][vector]  <- rsp
+ * After GPR push, rdi = &trap_frame.
+ */
 isr_common:
     push rax
     push rcx
@@ -81,9 +97,23 @@ isr_common:
     push r13
     push r14
     push r15
-    mov rdi, [rsp + 15*8]
+
+    /* swapgs if we came from user (CS.RPL == 3). CS is at
+       vector/error + 15 GPRs + rip + cs = 17*8 from rsp. */
+    mov  rax, [rsp + 17*8]
+    test rax, 3
+    jz   1f
+    swapgs
+1:
+    mov  rdi, rsp
     cld
     call isr_dispatch
+
+    mov  rax, [rsp + 17*8]
+    test rax, 3
+    jz   2f
+    swapgs
+2:
     pop r15
     pop r14
     pop r13
@@ -99,7 +129,7 @@ isr_common:
     pop rdx
     pop rcx
     pop rax
-    add rsp, 16
+    add rsp, 16              /* vector, error */
     iretq
 
     .section .note.GNU-stack, "", @progbits

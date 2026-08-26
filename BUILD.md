@@ -52,7 +52,7 @@ make clean
 ```
 qemu-system-x86_64 \
   -machine q35 \
-  -cpu qemu64,+syscall,+pae \
+  -cpu qemu64,+syscall,+pae,+smep,+smap \
   -m 256M \
   -serial stdio \
   -display none \
@@ -84,10 +84,14 @@ corruption.
 ## Host tests
 
 `make host` produces `build/jasos-host` and runs it. This is the same
-`mm/`, `ob/`, `ke/`, `fs/` C as the kernel, with `host/hal_host.c`
-providing serial, time, and a fake mmap of 128 MiB. Context switch is
-`ucontext` (`swapcontext` onto each thread's kstack). If host tests fail,
-the kernel is not "probably fine".
+`mm/`, `ob/`, `ke/`, `fs/` C as the kernel, with `host/main.c` providing
+serial, time, and a fake mmap of 128 MiB. Context switch is `ucontext`
+(`swapcontext` onto each thread's kstack + 4 KiB canary). If host tests
+fail, the kernel is not "probably fine".
+
+0.6 selftest also covers handle generation, `/dev/console`,
+`NtQueryVirtualMemory`, `NtWaitForMultipleObjects` WAIT_ANY, and pipe
+last-writer EOF.
 
 ```
 ./build/jasos-host
@@ -106,25 +110,32 @@ gdb build/kernel.elf
 (gdb) continue
 ```
 
-Serial is the console. There is no keyboard path in v1 besides COM1.
-`kprintf` is lock-free on panic (reentrant flag); if you deadlock
-the serial spinlock in a driver, panic still prints.
+Serial is COM1. Keyboard IRQ1 is drained into a small ring (`kbd.c`);
+the shell still prefers serial because that is what QEMU `-serial stdio`
+is. `kprintf` is lock-free on panic.
 
 Symbols: `kernel.elf` is not stripped. `build/kernel.map` is written
 by `ld -Map`.
+
+## 0.6 QEMU CPU flags
+
+`+smep,+smap` so QEMU's qemu64 actually presents the bits our
+`cpu_enable_smap_smep` looks for. Without them the kernel boots with
+SMEP=0 SMAP=0 and says so. That is honest, not a skip.
 
 ## Layout of this tree
 
 ```
 kernel/include/jasos/   public kernel headers
 kernel/boot/            Multiboot2 + 32→64
-kernel/hal/             serial, gdt, idt, pic, pit
+kernel/hal/             serial, gdt, idt, pic, pit, kbd
 kernel/mm/              pmm, vmm, heap
-kernel/ob/              objects, handles, directories
-kernel/ke/              kmain, sched, wait, syscall, panic
+kernel/ob/              objects, handles, directories, pipe, section
+kernel/ke/              kmain, sched, wait, syscall, panic, exec
 kernel/io/              IRP, device
-kernel/fs/              VFS, ramfs
+kernel/fs/              VFS, ramfs, ELF
 kernel/lib/             freestanding string/printf guts
-user/                   libc subset + init/sh/ls/cat/echo/ps/crash
+user/                   libc subset + init/sh/ls/cat/echo/ps/crash + hello
 host/                   POSIX HAL + host entry
+scripts/                embed_elf.py
 ```

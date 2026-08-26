@@ -34,7 +34,7 @@ status_t psp_create_init(void)
     if (!NT_SUCCESS(st)) return st;
     /* pid should be 1 — first user process after system (pid 0). */
     thread_t *t;
-    st = psp_create_thread(p, "init", init_thread, NULL, PRIORITY_NORMAL, &t);
+    st = psp_create_thread(p, "init", init_thread, NULL, PRIORITY_NORMAL, 0, &t);
     (void)t;
     kprintf("init: process created pid %llu\n", (unsigned long long)p->pid);
     return st;
@@ -123,6 +123,7 @@ void kmain_early(u64 mb2_phys)
     syscall_init();
     pci_init();
     kbd_init();
+    cpu_enable_smap_smep();
     __asm__ volatile("sti");
 #endif
 

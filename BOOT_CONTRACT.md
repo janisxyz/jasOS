@@ -78,7 +78,7 @@ for the AP trampoline hole we do not yet have.
 ```
 qemu-system-x86_64 ^
   -machine q35 ^
-  -cpu qemu64,+syscall,+pae ^
+  -cpu qemu64,+syscall,+pae,+smep,+smap ^
   -m 256M ^
   -serial stdio ^
   -display none ^
@@ -99,3 +99,9 @@ gdb build/kernel.elf -ex "target remote :1234" -ex "break kmain_early"
 ## Reversal log
 
 none.
+
+T6: every IDT gate uses an IST. IST1=#DF IST2=NMI IST3=#MC IST4=IRQ
+(16 KiB). Kernel ticks no longer triple-fault. `cpu_enable_smap_smep`
+runs after `syscall_init`/`kbd_init` and before `sti`. VGA text is
+written at both identity `0xB8000` and `HHDM_BASE+0xB8000` because
+we drop the identity map.

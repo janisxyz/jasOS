@@ -30,11 +30,16 @@ typedef struct context {
 } context_t;
 #endif
 
+/*
+ * Trap frame. Matches isr.S isr_common exactly. CPU (IST or CPL
+ * change) always pushes ss,rsp,rflags,cs,rip. Stub pushes error,vector.
+ * Then GPRs. Do not reorder.
+ */
 typedef struct trap_frame {
     u64 r15, r14, r13, r12, r11, r10, r9, r8;
     u64 rdi, rsi, rbp, rbx, rdx, rcx, rax;
+    u64 vector, error;
     u64 rip, cs, rflags, rsp, ss;
-    u64 error, vector, cr2;
 } trap_frame_t;
 
 struct file_object;
@@ -55,6 +60,9 @@ typedef struct thread {
     usize             kstack_size;
     trap_frame_t     *tf;
     wait_block_t      wait;
+    wait_block_t      wait_multi[WAIT_OBJECTS_MAX];
+    u32               wait_multi_count;
+    bool              wait_all;
     u64               wait_timeout_tick;
     bool              wait_timed;
     list_t            ready_link;
@@ -63,6 +71,8 @@ typedef struct thread {
     status_t          exit_status;
     char              name[32];
     status_t          last_status;
+    virt_t            user_rip;
+    virt_t            user_rsp;
 } thread_t;
 
 typedef struct process {
@@ -121,12 +131,13 @@ void      ke_on_tick(void);
 u64       ke_ticks(void);
 
 status_t  psp_create_process(const char *image, process_t *parent, process_t **out);
-status_t  psp_create_thread(process_t *p, const char *name, void (*entry)(void *), void *arg, u32 prio, thread_t **out);
+status_t  psp_create_thread(process_t *p, const char *name, void (*entry)(void *), void *arg, u32 prio, u32 flags, thread_t **out);
 status_t  psp_create_init(void);
 process_t *psp_system_process(void);
 u32       psp_snapshot(sys_process_info_t *buf, u32 max);
 
 status_t  ke_wait_object(dispatcher_t *d, u64 timeout_ticks);
+status_t  ke_wait_multiple(dispatcher_t **objs, u32 count, bool wait_all, u64 timeout_ticks);
 status_t  ke_set_event(event_object_t *e);
 status_t  ke_reset_event(event_object_t *e);
 status_t  ke_release_mutex(mutex_object_t *m);
@@ -142,6 +153,7 @@ void      tss_init(void);
 void      tss_set_rsp0(u64 rsp);
 void      pic_remap(u8 off1, u8 off2);
 void      pic_unmask(u8 irq);
+void      pic_eoi(u8 irq);
 void      pit_init(u32 hz);
 void      syscall_init(void);
 void      pci_init(void);
@@ -149,6 +161,9 @@ void      kbd_init(void);
 int       kbd_getchar(void);
 void      kbd_isr(void);
 status_t  syscall_from_entry(u64 *frame);
+void      isr_dispatch(trap_frame_t *tf);
+void      cpu_enable_smap_smep(void);
+void      user_thread_entry(void *arg);
 
 void      timer_init(void);
 void      timer_tick(u64 now);

@@ -213,6 +213,8 @@ void disp_wake_one(dispatcher_t *d, status_t st)
     wait_block_t *wb = CONTAINER_OF(e, wait_block_t, obj_link);
     list_remove(&wb->obj_link);
     wb->wake_status = st;
+    if (wb->thread)
+        wb->thread->wait.wake_status = st;
     if (d->type == DISP_MUTANT) {
         mutex_object_t *m = CONTAINER_OF(d, mutex_object_t, disp);
         m->owner = wb->thread;

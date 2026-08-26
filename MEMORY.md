@@ -87,11 +87,18 @@ we will reverse when the pager exists. Documented, not forgotten.
 
 ## Stacks
 
-Kernel stack: 16 KiB + 4 KiB guard (unmapped). Overflow in kernel is
-a double-fault on the IST stack, then panic. We do not try to recover.
+Kernel stack: 16 KiB + 4 KiB **canary** page filled with `0xA5`, checked
+on `sched_exit_thread`. A not-present guard in the heap VA is a lie —
+`kalloc` cannot punch a hole. Residual: dedicated `KERNEL_STACK_BASE`
+region with an unmapped page, then IST1 is the backstop not the first
+line. Overflow that eats the canary and the rest of the heap is still
+a panic, just later.
 
-User stack: 128 KiB default, guard page below. `NtAllocateVirtualMemory`
-can grow it; the shell does not.
+User stack: 128 KiB default minus one page. `psp_exec_image` maps
+`USER_STACK_SIZE - PAGE_SIZE` starting `PAGE_SIZE` above
+`USER_STACK_TOP - USER_STACK_SIZE`, so the lowest page is a hole not
+in any VAD. A PF there kills the thread (`vmm_handle_user_fault`
+refuses addresses with no VAD). That *is* an unmapped guard.
 
 ## Lock ranking (memory)
 
@@ -123,3 +130,10 @@ later pass; v1 zeros inline and eats the latency.
 
 none. Bitmap-first was the alternative; buddy won because coalescing
 bugs are the ones we want to see in host tests.
+
+T6: `vmm_unmap` frees the frame (it used to leak). `vmm_aspace_destroy`
+walks user PML4[0..255], frees leftover leaves + tables, leaves kernel
+half shared. Hardware `copyin`/`copyout`/`copyinstr` go through
+`vmm_read_aspace`/`vmm_write_aspace` (HHDM), not user VA + STAC.
+`vmm_handle_user_fault` demand-zeros a missing PTE inside a committed
+VAD; a PF outside a VAD kills the thread.

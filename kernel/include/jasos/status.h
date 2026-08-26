@@ -3,6 +3,7 @@
 #include <jasos/types.h>
 
 #define STATUS_SUCCESS                 ((status_t)0x00000000u)
+#define STATUS_WAIT_0                  ((status_t)0x00000000u)
 #define STATUS_ABANDONED               ((status_t)0x00000080u)
 #define STATUS_TIMEOUT                 ((status_t)0x00000102u)
 #define STATUS_PENDING                 ((status_t)0x00000103u)

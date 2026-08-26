@@ -19,9 +19,15 @@ void pic_remap(u8 off1, u8 off2)
 void pic_unmask(u8 irq)
 {
     u16 port = irq < 8 ? 0x21 : 0xA1;
-    if (irq >= 8) irq -= 8;
+    u8 bit = irq < 8 ? irq : (u8)(irq - 8);
     u8 m = 0;
     __asm__ volatile("inb %1, %0" : "=a"(m) : "Nd"(port));
-    m &= (u8)~(1u << irq);
+    m &= (u8)~(1u << bit);
     outb(port, m);
+}
+
+void pic_eoi(u8 irq)
+{
+    if (irq >= 8) outb(0xA0, 0x20);
+    outb(0x20, 0x20);
 }

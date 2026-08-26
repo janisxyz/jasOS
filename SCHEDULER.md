@@ -98,15 +98,27 @@ is never returned to. Idle then picks init if it is ready (it is).
 ## Lock ranking
 
 ```
-6  scheduler   (dispatcher lock)
-7  wait object (per dispatcher header; acquire after sched is illegal)
+9   DISP    (dispatcher object)
+10  SCHED   (ready queues)
 ```
 
 You may take a wait-object lock then the scheduler lock. You may not
-take the scheduler lock then a wait-object lock. Documented in
-`ke/wait.c` as `LOCK_SCHED` / `LOCK_DISP`.
+take the scheduler lock then a wait-object lock. T3 reversal: v0.3 had
+this backwards and ping/pong paniced. `sched_ready` is idempotent
+(READY/RUNNING is a no-op) so WaitForMultiple cannot double-insert.
+
+On last thread of a process, `sched_exit_thread` drops PROC **before**
+destroying the aspace and handle table (VMM=4, HANDLE=7 are below PROC=8).
+
+Hardware switch loads CR3 from `next->process->aspace.cr3_phys` and
+`tss_set_rsp0` to the top of the new kstack.
 
 ## Reversal log
 
 none. 4-class MLFQ was considered; 32-level RR is what we will
 measure against in the performance pass.
+
+T6: `NtWaitForMultipleObjects` enqueues a wait_block on every object,
+wakes on any (WAIT_ANY) or retries until all signaled (WAIT_ALL).
+Timeout scan in `ke_on_tick` unlinks every wait_block, not just `t->wait`.
+Kstack canary checked on exit.

@@ -3,9 +3,9 @@
 #include <jasos/types.h>
 
 #define JASOS_VERSION_MAJOR  0
-#define JASOS_VERSION_MINOR  5
+#define JASOS_VERSION_MINOR  6
 #define JASOS_VERSION_PATCH  0
-#define JASOS_VERSION_STR    "0.5.0-aegis"
+#define JASOS_VERSION_STR    "0.6.0-aegis"
 
 #define PAGE_SHIFT           12u
 #define PAGE_SIZE            (1u << PAGE_SHIFT)
@@ -35,13 +35,11 @@
 #define HEAP_CLASSES         9u
 
 #define HANDLE_TABLE_SLOTS   1024u
-#define HANDLE_VALUE(i)      ((handle_t)(i) << 2)
-#define HANDLE_INDEX(h)      ((u32)((h) >> 2))
+/* handle = (generation << 16) | (index << 2). Low 2 bits stay 0. */
+#define HANDLE_VALUE(i, g)   (((handle_t)(i) << 2) | ((handle_t)(u32)(g) << 16))
+#define HANDLE_INDEX(h)      ((u32)(((h) >> 2) & 0x3FFFu))
+#define HANDLE_GEN(h)        ((u32)((h) >> 16))
 #define HANDLE_CURRENT       ((handle_t)-1)
-
-#define STD_INPUT_HANDLE     HANDLE_VALUE(1)
-#define STD_OUTPUT_HANDLE    HANDLE_VALUE(2)
-#define STD_ERROR_HANDLE     HANDLE_VALUE(3)
 
 #define PRIORITY_LEVELS      32u
 #define PRIORITY_IDLE        0u
@@ -55,6 +53,14 @@
 #define NAME_MAX             64u
 #define PATH_DEPTH_MAX       32u
 #define COPY_MAX             (1u * 1024u * 1024u)
+#define SYSCALL_COPY_MAX     (64u * 1024u)
+
+#define WAIT_OBJECTS_MAX     16u
+#define WAIT_ANY             0u
+#define WAIT_ALL             1u
+
+#define KERNEL_STACK_BASE    0xFFFFA00000000000ULL
+
 
 #define MAX_CPUS             1u
 #define MAX_PROCESSES        64u

@@ -172,13 +172,92 @@ int selftest_run(void)
     st = ob_create_event(NULL, false, false, &g_e2);
     EXPECT(NT_SUCCESS(st), "event e2");
     thread_t *t1 = NULL, *t2 = NULL;
-    st = psp_create_thread(psp_system_process(), "ping", ping_fn, NULL, PRIORITY_NORMAL, &t1);
+    st = psp_create_thread(psp_system_process(), "ping", ping_fn, NULL, PRIORITY_NORMAL, 0, &t1);
     EXPECT(NT_SUCCESS(st) && t1, "thread ping");
-    st = psp_create_thread(psp_system_process(), "pong", pong_fn, NULL, PRIORITY_NORMAL, &t2);
+    st = psp_create_thread(psp_system_process(), "pong", pong_fn, NULL, PRIORITY_NORMAL, 0, &t2);
     EXPECT(NT_SUCCESS(st) && t2, "thread pong");
     kprintf("selftest: entering dispatcher for ping/pong\n");
     sched_start();
     EXPECT(g_ping == 2 && g_pong == 1, "thread ping-pong");
+
+    /* Handle generation: close then reopen the same slot must not
+       accept the stale value. */
+    {
+        handle_t h1 = 0, h2 = 0;
+        st = NtCreateFile(&h1, FILE_READ_DATA, "/tmp/st/file.txt", FILE_OPEN, FILE_NON_DIRECTORY_FILE);
+        EXPECT(NT_SUCCESS(st) && h1, "handle gen open");
+        st = NtClose(h1);
+        EXPECT(NT_SUCCESS(st), "handle gen close");
+        st = NtClose(h1);
+        EXPECT(st == STATUS_INVALID_HANDLE, "stale gen rejected");
+        st = NtCreateFile(&h2, FILE_READ_DATA, "/tmp/st/file.txt", FILE_OPEN, FILE_NON_DIRECTORY_FILE);
+        EXPECT(NT_SUCCESS(st) && h2 && h2 != h1, "handle gen reuse new value");
+        EXPECT(HANDLE_GEN(h2) != 0, "handle gen nonzero");
+        NtClose(h2);
+    }
+
+    /* /dev/console is a CHAR vnode. */
+    {
+        handle_t ch = 0;
+        st = NtCreateFile(&ch, FILE_WRITE_DATA, "/dev/console", FILE_OPEN, FILE_NON_DIRECTORY_FILE);
+        EXPECT(NT_SUCCESS(st) && ch, "/dev/console open");
+        u64 wn = 0;
+        st = NtWriteFile(ch, "console-ok\n", 11, 0, &wn);
+        EXPECT(NT_SUCCESS(st) && wn == 11, "/dev/console write");
+        NtClose(ch);
+    }
+
+    /* NtQueryVirtualMemory on a mapped section. */
+    {
+        handle_t sec = 0;
+        st = NtCreateSection(&sec, SECTION_ALL_ACCESS, 4096, PAGE_READWRITE);
+        EXPECT(NT_SUCCESS(st), "qvm section");
+        virt_t mb = 0x0000000002100000ULL;
+        st = NtMapViewOfSection(sec, HANDLE_CURRENT, &mb, 4096, PAGE_READWRITE);
+        EXPECT(NT_SUCCESS(st), "qvm map");
+        memory_basic_information_t inf;
+        memset(&inf, 0, sizeof(inf));
+        st = NtQueryVirtualMemory(HANDLE_CURRENT, mb, &inf, sizeof(inf));
+        EXPECT(NT_SUCCESS(st) && inf.base == mb && inf.region_size >= 4096, "NtQueryVirtualMemory");
+        NtUnmapViewOfSection(HANDLE_CURRENT, mb);
+        NtClose(sec);
+    }
+
+    /* WaitForMultipleObjects WAIT_ANY. */
+    {
+        handle_t e1 = 0, e2 = 0;
+        st = NtCreateEvent(&e1, NULL, true, false);
+        EXPECT(NT_SUCCESS(st), "wfmo e1");
+        st = NtCreateEvent(&e2, NULL, true, false);
+        EXPECT(NT_SUCCESS(st), "wfmo e2");
+        handle_t hs[2] = { e1, e2 };
+        st = NtWaitForMultipleObjects(hs, 2, false, 0);
+        EXPECT(st == STATUS_TIMEOUT, "wfmo timeout");
+        st = NtSetEvent(e2);
+        EXPECT(NT_SUCCESS(st), "wfmo set e2");
+        st = NtWaitForMultipleObjects(hs, 2, false, 0);
+        EXPECT(st == (status_t)1, "wfmo wait-any index 1");
+        NtClose(e1);
+        NtClose(e2);
+    }
+
+    /* Pipe last-writer close yields EOF. */
+    {
+        handle_t pr = 0, pw = 0;
+        st = NtCreatePipe(&pr, &pw);
+        EXPECT(NT_SUCCESS(st), "eof pipe create");
+        u64 wn = 0, rn = 0;
+        st = NtWriteFile(pw, "xy", 2, 0, &wn);
+        EXPECT(NT_SUCCESS(st) && wn == 2, "eof pipe write");
+        NtClose(pw);
+        char pbuf[8];
+        memset(pbuf, 0, sizeof(pbuf));
+        st = NtReadFile(pr, pbuf, 2, 0, &rn);
+        EXPECT(NT_SUCCESS(st) && rn == 2 && pbuf[0] == 'x', "eof pipe drain");
+        st = NtReadFile(pr, pbuf, 1, 0, &rn);
+        EXPECT(st == STATUS_END_OF_FILE, "eof pipe last writer");
+        NtClose(pr);
+    }
 
     kprintf("selftest: all assertions passed\n");
     return 0;

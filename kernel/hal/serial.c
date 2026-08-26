@@ -62,22 +62,28 @@ int serial_poll_char(void)
 void console_emit(char c)
 {
     serial_putchar(c);
-    /* VGA text fallback so a machine without COM still shows life. */
-    static u16 *vga = (u16 *)(KERNEL_VMA + 0xB8000);
+    /* VGA text at phys 0xB8000. Identity during early boot, HHDM after vmm. */
     static u32 col, row;
-    /* Before higher-half we may still be identity-mapped; try both. */
-    u16 *v = vga;
+    static int scrolled;
+    u16 *vga_id = (u16 *)(uintptr_t)0xB8000;
+    u16 *vga_hh = (u16 *)(uintptr_t)(HHDM_BASE + 0xB8000);
     if (c == '\n') {
         col = 0;
         if (row < 24) row++;
+        else scrolled = 1;
         return;
     }
     if (c == '\r') { col = 0; return; }
+    if (c == '\t') {
+        col = (col + 8) & ~7u;
+        if (col >= 80) { col = 0; if (row < 24) row++; }
+        return;
+    }
     if (row >= 25 || col >= 80) return;
-    /* Physical 0xB8000 is in the HHDM after vmm_init; during early boot
-       identity map makes 0xB8000 work. Write both. */
-    ((u16 *)0xB8000)[row * 80 + col] = (u16)c | 0x0700;
-    (void)v;
+    u16 cell = (u16)(u8)c | 0x0700;
+    vga_id[row * 80 + col] = cell;
+    vga_hh[row * 80 + col] = cell;
+    (void)scrolled;
     col++;
     if (col >= 80) { col = 0; if (row < 24) row++; }
 }

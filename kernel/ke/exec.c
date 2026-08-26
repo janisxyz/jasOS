@@ -92,6 +92,21 @@ static void user_launch(void *arg)
     vmm_write_aspace(&p->aspace, sp, &z, 8);
     enter_user(p->user_entry, sp, 0x202);
 }
+
+void user_thread_entry(void *arg)
+{
+    (void)arg;
+    thread_t *t = ke_current();
+    if (!t || !t->user_rip)
+        NtTerminateProcess(HANDLE_CURRENT, STATUS_INVALID_PARAMETER);
+    enter_user(t->user_rip, t->user_rsp, 0x202);
+}
+#else
+void user_thread_entry(void *arg)
+{
+    (void)arg;
+    NtTerminateProcess(HANDLE_CURRENT, STATUS_NOT_IMPLEMENTED);
+}
 #endif
 
 status_t psp_exec_image(process_t *p, const u8 *image, u64 len, virt_t *entry_out)
@@ -99,8 +114,8 @@ status_t psp_exec_image(process_t *p, const u8 *image, u64 len, virt_t *entry_ou
     virt_t entry = 0;
     status_t st = elf_load(p, image, len, &entry);
     if (!NT_SUCCESS(st)) return st;
-    virt_t stack_base = USER_STACK_TOP - USER_STACK_SIZE;
-    st = vmm_alloc_user(p, &stack_base, USER_STACK_SIZE, PAGE_READWRITE, MEM_COMMIT);
+    virt_t stack_base = USER_STACK_TOP - USER_STACK_SIZE + PAGE_SIZE;
+    st = vmm_alloc_user(p, &stack_base, USER_STACK_SIZE - PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
     if (!NT_SUCCESS(st)) return st;
     p->user_entry = entry;
     p->user_stack = USER_STACK_TOP - 16;
@@ -175,14 +190,14 @@ status_t NtCreateProcess(handle_t *out, access_t access, const char *image, u32 
         thread_t *t = NULL;
         if (is_builtin) {
             st = psp_create_thread(p, p->image, builtin_entry, (void *)mainfn,
-                                   PRIORITY_NORMAL, &t);
+                                   PRIORITY_NORMAL, 0, &t);
         } else if (is_elf) {
 #ifdef JASOS_HOST
             st = psp_create_thread(p, p->image, elf_host_stub, NULL,
-                                   PRIORITY_NORMAL, &t);
+                                   PRIORITY_NORMAL, 0, &t);
 #else
             st = psp_create_thread(p, p->image, user_launch, NULL,
-                                   PRIORITY_NORMAL, &t);
+                                   PRIORITY_NORMAL, 0, &t);
 #endif
         }
         (void)t;

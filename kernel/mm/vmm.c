@@ -42,6 +42,10 @@ void vmm_aspace_init(aspace_t *as)
 
 void vmm_aspace_destroy(aspace_t *as)
 {
+    for (u32 i = 0; i < as->vad_count; i++) {
+        if (as->host_shadow[i]) kfree(as->host_shadow[i]);
+        as->host_shadow[i] = NULL;
+    }
     memset(as, 0, sizeof(*as));
 }
 
@@ -77,6 +81,7 @@ bool vmm_probe_user(aspace_t *as, virt_t va, u64 n, bool write)
 status_t copyin(void *kdst, virt_t usrc, u64 n)
 {
     if (!kdst) return STATUS_INVALID_PARAMETER;
+    if (n == 0) return STATUS_SUCCESS;
     if (n > COPY_MAX) return STATUS_INVALID_PARAMETER;
     memcpy(kdst, (void *)(uintptr_t)usrc, (size_t)n);
     return STATUS_SUCCESS;
@@ -214,23 +219,21 @@ void vmm_aspace_init(aspace_t *as)
     as->stack_base = USER_STACK_TOP - USER_STACK_SIZE;
 }
 
-void vmm_aspace_destroy(aspace_t *as)
-{
-    /* v1: leak user PTs on process exit except the cr3 page. Honest. */
-    if (as->cr3_phys) pmm_free(as->cr3_phys, 0);
-    as->cr3_phys = 0;
-}
-
 status_t vmm_map(aspace_t *as, virt_t va, phys_t pa, u64 n_pages, u64 flags)
 {
     spin_lock(&as->lock);
     for (u64 i = 0; i < n_pages; i++) {
-        u64 *pte = walk_alloc(as->cr3_phys, va + i * PAGE_SIZE, true);
+        virt_t page = va + i * PAGE_SIZE;
+        u64 *pte = walk_alloc(as->cr3_phys, page, true);
         if (!pte) {
             spin_unlock(&as->lock);
             return STATUS_NO_MEMORY;
         }
         *pte = (pa + i * PAGE_SIZE) | flags | PTE_P;
+        u64 cur_cr3;
+        __asm__ volatile("mov %%cr3, %0" : "=r"(cur_cr3));
+        if (cur_cr3 == as->cr3_phys)
+            __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
     }
     spin_unlock(&as->lock);
     return STATUS_SUCCESS;
@@ -240,11 +243,63 @@ status_t vmm_unmap(aspace_t *as, virt_t va, u64 n_pages)
 {
     spin_lock(&as->lock);
     for (u64 i = 0; i < n_pages; i++) {
-        u64 *pte = walk_alloc(as->cr3_phys, va + i * PAGE_SIZE, false);
-        if (pte) *pte = 0;
+        virt_t page = va + i * PAGE_SIZE;
+        u64 *pte = walk_alloc(as->cr3_phys, page, false);
+        if (pte && (*pte & PTE_P)) {
+            phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
+            *pte = 0;
+            pmm_free(pa, 0);
+            u64 cur_cr3;
+            __asm__ volatile("mov %%cr3, %0" : "=r"(cur_cr3));
+            if (cur_cr3 == as->cr3_phys)
+                __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
+        }
     }
     spin_unlock(&as->lock);
     return STATUS_SUCCESS;
+}
+
+/*
+ * Drop user half of the 4-level tree. Kernel PML4 slots 256..511 are
+ * shared with the template and must not be freed. Leaf frames that
+ * survived vmm_unmap (not in a VAD) are freed here so exit does not
+ * leak the user's heap.
+ */
+static void free_user_tables(phys_t table, int level)
+{
+    if (!table || table == PMM_INVALID) return;
+    u64 *t = map_window(table);
+    if (level == 4) {
+        for (u32 i = 0; i < KERNEL_PML4_START; i++) {
+            if (t[i] & PTE_P)
+                free_user_tables(t[i] & 0x000FFFFFFFFFF000ULL, 3);
+        }
+        pmm_free(table, 0);
+        return;
+    }
+    for (u32 i = 0; i < 512; i++) {
+        if (!(t[i] & PTE_P)) continue;
+        if (t[i] & PTE_PS) continue; /* 2 MiB leaf: not used for user v1 */
+        phys_t child = t[i] & 0x000FFFFFFFFFF000ULL;
+        if (level > 1)
+            free_user_tables(child, level - 1);
+        else
+            pmm_free(child, 0);
+        t[i] = 0;
+    }
+    pmm_free(table, 0);
+}
+
+void vmm_aspace_destroy(aspace_t *as)
+{
+    if (!as->cr3_phys) return;
+    for (u32 i = 0; i < as->vad_count; i++) {
+        u64 pages = (as->vads[i].end - as->vads[i].start) / PAGE_SIZE;
+        vmm_unmap(as, as->vads[i].start, pages);
+    }
+    as->vad_count = 0;
+    free_user_tables(as->cr3_phys, 4);
+    as->cr3_phys = 0;
 }
 
 bool vmm_probe_user(aspace_t *as, virt_t va, u64 n, bool write)
@@ -259,22 +314,55 @@ bool vmm_probe_user(aspace_t *as, virt_t va, u64 n, bool write)
     return true;
 }
 
+#ifndef JASOS_HOST
+/* STAC/CLAC exist for a raw-touch path we do not take. copy* walks PTEs
+   and copies through HHDM so SMAP stays on. Attribute keeps -Wall quiet. */
+static inline void user_touch_begin(void) __attribute__((unused));
+static inline void user_touch_end(void) __attribute__((unused));
+static inline void user_touch_begin(void)
+{
+    u64 cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    if (cr4 & (1ULL << 21))
+        __asm__ volatile("stac" ::: "memory");
+}
+static inline void user_touch_end(void)
+{
+    u64 cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    if (cr4 & (1ULL << 21))
+        __asm__ volatile("clac" ::: "memory");
+}
+#endif
+
+/*
+ * Hardware copyin/copyout never dereference a user VA. They walk the
+ * current process's PTEs and memcpy through the HHDM. SMAP can stay
+ * on for the whole call; STAC is unused on this path.
+ *
+ * Why this will still fail in production:
+ *  - No mmap_sem. Concurrent NtFreeVirtualMemory can yank a PTE
+ *    between probe and the HHDM copy. We re-walk per page in
+ *    vmm_read_aspace; a missing PTE fails closed with AV.
+ */
 status_t copyin(void *kdst, virt_t usrc, u64 n)
 {
     process_t *p = ke_current_process();
     if (!p || !kdst) return STATUS_INVALID_PARAMETER;
+    if (n == 0) return STATUS_SUCCESS;
+    if (n > COPY_MAX) return STATUS_INVALID_PARAMETER;
     if (!vmm_probe_user(&p->aspace, usrc, n, false)) return STATUS_ACCESS_VIOLATION;
-    memcpy(kdst, (void *)(uintptr_t)usrc, (size_t)n);
-    return STATUS_SUCCESS;
+    return vmm_read_aspace(&p->aspace, kdst, usrc, n);
 }
 
 status_t copyout(virt_t udst, const void *ksrc, u64 n)
 {
     process_t *p = ke_current_process();
     if (!p || !ksrc) return STATUS_INVALID_PARAMETER;
+    if (n == 0) return STATUS_SUCCESS;
+    if (n > COPY_MAX) return STATUS_INVALID_PARAMETER;
     if (!vmm_probe_user(&p->aspace, udst, n, true)) return STATUS_ACCESS_VIOLATION;
-    memcpy((void *)(uintptr_t)udst, ksrc, (size_t)n);
-    return STATUS_SUCCESS;
+    return vmm_write_aspace(&p->aspace, udst, ksrc, n);
 }
 
 status_t copyinstr(char *kdst, virt_t usrc, u64 cap)
@@ -282,13 +370,52 @@ status_t copyinstr(char *kdst, virt_t usrc, u64 cap)
     process_t *p = ke_current_process();
     if (!p || !kdst || cap == 0) return STATUS_INVALID_PARAMETER;
     for (u64 i = 0; i < cap; i++) {
-        if (!vmm_probe_user(&p->aspace, usrc + i, 1, false)) return STATUS_ACCESS_VIOLATION;
-        char c = *(char *)(uintptr_t)(usrc + i);
+        char c;
+        if (!vmm_probe_user(&p->aspace, usrc + i, 1, false))
+            return STATUS_ACCESS_VIOLATION;
+        status_t st = vmm_read_aspace(&p->aspace, &c, usrc + i, 1);
+        if (!NT_SUCCESS(st)) return st;
         kdst[i] = c;
         if (c == 0) return STATUS_SUCCESS;
     }
     kdst[cap - 1] = 0;
     return STATUS_NAME_TOO_LONG;
+}
+
+bool vmm_handle_user_fault(aspace_t *as, virt_t va, bool write)
+{
+    if (!as || va > USER_CANONICAL_TOP) return false;
+    virt_t page = PAGE_ALIGN_DOWN(va);
+    u32 prot = 0;
+    int hit = 0;
+    spin_lock(&as->lock);
+    for (u32 i = 0; i < as->vad_count; i++) {
+        if (page >= as->vads[i].start && page < as->vads[i].end) {
+            prot = as->vads[i].prot;
+            hit = 1;
+            break;
+        }
+    }
+    spin_unlock(&as->lock);
+    if (!hit) return false;
+    if (write && !(prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+        return false;
+    u64 *pte = walk_alloc(as->cr3_phys, page, false);
+    if (pte && (*pte & PTE_P)) {
+        if (write && !(*pte & PTE_W)) return false;
+        return true; /* spurious */
+    }
+    phys_t pa = pmm_alloc(0, PMM_USER | PMM_ZERO);
+    if (pa == PMM_INVALID) return false;
+    u64 flags = PTE_P | PTE_U;
+    if (prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) flags |= PTE_W;
+    if (!(prot & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
+        flags |= PTE_NX;
+    if (!NT_SUCCESS(vmm_map(as, page, pa, 1, flags))) {
+        pmm_free(pa, 0);
+        return false;
+    }
+    return true;
 }
 
 #endif /* !JASOS_HOST */
@@ -433,3 +560,19 @@ status_t vmm_read_aspace(aspace_t *as, void *dst, virt_t va, u64 n)
     return STATUS_SUCCESS;
 #endif
 }
+
+aspace_t *vmm_kernel_aspace(void)
+{
+    return &g_kernel_as;
+}
+
+#ifdef JASOS_HOST
+bool vmm_handle_user_fault(aspace_t *as, virt_t va, bool write)
+{
+    (void)as;
+    (void)va;
+    (void)write;
+    return false;
+}
+#endif
+

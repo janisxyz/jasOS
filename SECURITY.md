@@ -19,20 +19,28 @@ closed vs residual.
 | `sysret` to kernel RIP | canonical check in `syscall_entry.S` (`shr 47` / `ud2`) |
 | ELF PT_INTERP / ET_DYN | refused |
 | pid 1 exit | panic `"init died"` — no "return to firmware" lie |
+| Stale handle after close | `HANDLE_VALUE(i, gen)`; lookup rejects gen mismatch; close bumps gen (selftest) |
+| Same-CPL IRQ frame | IST4 so PIT in kernel always pushes ss/rsp |
+| User RIP in kernel | `NtCreateThread` on `user_mode` process uses `enter_user`, never `call` |
+| copyin through user VA | hardware path: `vmm_probe_user` + `vmm_read_aspace` via HHDM; SMAP stays on |
+| Syscall user pointers | marshalling bounce for Create/Read/Write/path/Event/Mutex/Section/VM/Pipe/Query/* |
+| SMEP/SMAP off | `cpu_enable_smap_smep` CPUID-gated, before `sti` |
+| Process exit leak | last thread `vmm_aspace_destroy` (walk user half, free frames+tables) + `ht_destroy` |
 
 ## Residual (honest)
 
 | Residual | Why it still exists | Mitigation |
 |---|---|---|
-| Kernel-linked userland | ELF user programs are loaded by `elf_load` but init/sh are linked into the kernel for v1 so we have a shell the day the box boots | Treat sh as ring 0. Do not ship this as a security boundary. Hardware path: user CR3 + `enter_user` + syscall/sysret. |
-| No SMEP/SMAP | HAL does not set CR4.SMEP/SMAP | Set both before first `enter_user` |
-| No KASLR | kernel at `0xFFFFFFFF80000000` | Fine until we have a UEFI stub with entropy |
+| Kernel-linked userland | init/sh/ls/cat/echo/ps/crash are still linked into kernel.elf so the box has a shell the day it boots | Treat sh as ring 0. `/bin/hello` is the ring-3 path. |
+| No KASLR | kernel at `0xFFFFFFFF80000000` | Fine until a UEFI stub with entropy |
 | FXSAVE missing | SSE from user clobbers kernel XMM | Kernel built `-mno-sse`; do not enable XMM in user until FXSAVE |
 | VAD array 64 | a mapping bomb fails closed with `INSUFFICIENT_RESOURCES` | fail closed is the mitigation |
-| Recursive PML4 | if a user map ever got slot 510, they own page tables | `vmm_map` of user aspace copies kernel half from template; user `NtMap` rejects high VA |
-| Host `copyin` is memcpy | host HAL is not a security boundary | hardware path probes PTEs |
+| Recursive PML4 | if a user map ever got slot 510, they own page tables | user `NtMap` rejects high VA; user half of CR3 is private |
+| Host `copyin` is memcpy | host HAL is not a security boundary | hardware path probes PTEs and copies via HHDM |
 | Admin == kernel | Token is a field, not an object | do not claim otherwise |
-| ELF memcpy via parent CR3 | closed: `vmm_write_aspace` copies through HHDM / host_shadow | — |
+| Pipe `NtDuplicateObject` | dup of a write handle does not increment `writers` | last-writer EOF can fire early; documented, not silent |
+| Kernel stack guard | canary page of `0xA5`, not a not-present PTE | IST1 still catches DF; canary panics on exit |
+| Syscall bounce 64 KiB | reads/writes > 64 KiB from user return `INVALID_PARAMETER` | chunk in 0.7 |
 
 ## Panic path contract
 

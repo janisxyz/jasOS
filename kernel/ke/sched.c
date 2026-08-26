@@ -59,6 +59,10 @@ void sched_ready(thread_t *t)
 {
     if (!t || t->state == THR_TERMINATED) return;
     spin_lock(&g_sched_lock);
+    if (t->state == THR_READY || t->state == THR_RUNNING) {
+        spin_unlock(&g_sched_lock);
+        return;
+    }
     t->state = THR_READY;
     ready_insert(t);
     pcb_t *cpu = ke_pcb();
@@ -198,19 +202,53 @@ void sched_yield(void)
 void sched_exit_thread(status_t st)
 {
     thread_t *t = ke_current();
+    /* Dying waiter must not stay on an object's wait_list. One DISP
+       at a time; then we take SCHED in reschedule. */
+    if (t->wait_multi_count) {
+        for (u32 i = 0; i < t->wait_multi_count; i++) {
+            dispatcher_t *d = t->wait_multi[i].object;
+            if (!d) continue;
+            spin_lock(&d->lock);
+            list_remove(&t->wait_multi[i].obj_link);
+            t->wait_multi[i].object = NULL;
+            spin_unlock(&d->lock);
+        }
+        t->wait_multi_count = 0;
+    } else if (t->wait.object) {
+        dispatcher_t *d = t->wait.object;
+        spin_lock(&d->lock);
+        list_remove(&t->wait.obj_link);
+        t->wait.object = NULL;
+        spin_unlock(&d->lock);
+    }
+    if (t->kstack) {
+        u8 *g = t->kstack - PAGE_SIZE;
+        for (u32 i = 0; i < 16; i++) {
+            if (g[i] != 0xA5)
+                panic("kstack smash thread %s", t->name);
+        }
+    }
     t->exit_status = st;
     t->state = THR_TERMINATED;
     disp_signal(&t->disp, 1);
-    if (t->process) {
-        spin_lock(&t->process->lock);
-        t->process->thread_count--;
-        if (t->process->thread_count == 0) {
-            t->process->exit_status = st;
-            t->process->terminating = true;
-            disp_signal(&t->process->disp, 1);
-            if (t->process->pid == 1) panic("init died status %s", status_name(st));
+    process_t *proc = t->process;
+    int last = 0;
+    if (proc) {
+        spin_lock(&proc->lock);
+        proc->thread_count--;
+        if (proc->thread_count == 0) {
+            proc->exit_status = st;
+            proc->terminating = true;
+            last = 1;
+            if (proc->pid == 1) panic("init died status %s", status_name(st));
         }
-        spin_unlock(&t->process->lock);
+        spin_unlock(&proc->lock);
+        if (last) {
+            disp_signal(&proc->disp, 1);
+            /* No PROC lock: VMM=4 and HANDLE=7 are below PROC=8. */
+            vmm_aspace_destroy(&proc->aspace);
+            ht_destroy(&proc->handles);
+        }
     }
     ke_pcb()->current = NULL;
     sched_reschedule();
@@ -231,6 +269,21 @@ void ke_on_tick(void)
             thread_t *th = CONTAINER_OF(e, thread_t, proc_link);
             if (th->state != THR_WAITING || !th->wait_timed) continue;
             if (cpu->ticks < th->wait_timeout_tick) continue;
+            if (th->wait_multi_count) {
+                for (u32 k = 0; k < th->wait_multi_count; k++) {
+                    dispatcher_t *d = th->wait_multi[k].object;
+                    if (!d) continue;
+                    spin_lock(&d->lock);
+                    list_remove(&th->wait_multi[k].obj_link);
+                    spin_unlock(&d->lock);
+                }
+                th->wait.wake_status = STATUS_TIMEOUT;
+                th->wait_timed = false;
+                th->wait_multi_count = 0;
+                sched_ready(th);
+                cpu->need_resched = true;
+                continue;
+            }
             dispatcher_t *d = th->wait.object;
             if (d) {
                 spin_lock(&d->lock);
@@ -276,7 +329,7 @@ void sched_init(void)
     strlcpy(g_system->cwd, "/", PATH_MAX);
     g_procs[g_nprocs++] = g_system;
 
-    status_t st = psp_create_thread(g_system, "idle", idle_entry, NULL, PRIORITY_IDLE, &g_idle);
+    status_t st = psp_create_thread(g_system, "idle", idle_entry, NULL, PRIORITY_IDLE, 0, &g_idle);
     if (!NT_SUCCESS(st)) panic("sched: idle");
     g_idle->state = THR_READY;
     ke_pcb()->idle = g_idle;
@@ -309,7 +362,7 @@ void sched_start(void)
 }
 
 status_t psp_create_thread(process_t *p, const char *name, void (*entry)(void *),
-                           void *arg, u32 prio, thread_t **out)
+                           void *arg, u32 prio, u32 flags, thread_t **out)
 {
     if (!p || !entry) return STATUS_INVALID_PARAMETER;
     if (prio >= PRIORITY_LEVELS) prio = PRIORITY_NORMAL;
@@ -323,12 +376,24 @@ status_t psp_create_thread(process_t *p, const char *name, void (*entry)(void *)
     t->quantum_left = QUANTUM_TICKS;
     t->kstack_size = KSTACK_SIZE;
 #ifdef JASOS_HOST
-    if (posix_memalign((void **)&t->kstack, 16, KSTACK_SIZE) != 0)
-        t->kstack = NULL;
-    else
-        memset(t->kstack, 0, KSTACK_SIZE);
+    {
+        void *raw = NULL;
+        if (posix_memalign(&raw, 16, KSTACK_SIZE + PAGE_SIZE) != 0)
+            t->kstack = NULL;
+        else {
+            memset(raw, 0xA5, PAGE_SIZE);
+            memset((u8 *)raw + PAGE_SIZE, 0, KSTACK_SIZE);
+            t->kstack = (u8 *)raw + PAGE_SIZE;
+        }
+    }
 #else
-    t->kstack = kalloc_zero(KSTACK_SIZE);
+    {
+        u8 *raw = kalloc_zero(KSTACK_SIZE + PAGE_SIZE);
+        if (raw) {
+            memset(raw, 0xA5, PAGE_SIZE);
+            t->kstack = raw + PAGE_SIZE;
+        }
+    }
 #endif
     if (!t->kstack) {
         ob_dereference(&t->hdr);
@@ -361,7 +426,8 @@ status_t psp_create_thread(process_t *p, const char *name, void (*entry)(void *)
     spin_unlock(&p->lock);
     ob_reference(&p->hdr);
     if (out) *out = t;
-    sched_ready(t);
+    if (!(flags & CREATE_SUSPENDED))
+        sched_ready(t);
     return STATUS_SUCCESS;
 }
 

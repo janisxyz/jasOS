@@ -40,11 +40,16 @@
     SYSCALL_STUB NtUnmapViewOfSection,       23
     SYSCALL_STUB NtAllocateVirtualMemory,    24
     SYSCALL_STUB NtFreeVirtualMemory,        25
+    SYSCALL_STUB NtQueryVirtualMemory,       26
+    SYSCALL_STUB NtCreateDirectoryObject,    27
+    SYSCALL_STUB NtOpenDirectoryObject,      28
+    SYSCALL_STUB NtRaiseException,           29
     SYSCALL_STUB NtGetCwd,                   30
     SYSCALL_STUB NtSetCwd,                   31
     SYSCALL_STUB NtCreatePipe,               32
     SYSCALL_STUB NtCreateTimer,              33
     SYSCALL_STUB NtSetTimer,                 34
-    SYSCALL_STUB NtCreateDirectoryObject,    27
+    SYSCALL_STUB NtCancelTimer,              35
+    SYSCALL_STUB NtWaitForMultipleObjects,   36
 
     .section .note.GNU-stack, "", @progbits

@@ -25,6 +25,9 @@ typedef struct pipe_object {
     u8           buf[PIPE_CAP];
     u32          r, w, used;
     spinlock_t   lock;
+    u32          readers;
+    u32          writers;
+    bool         writer_closed;
 } pipe_object_t;
 
 static object_type_t g_pipe_type;
@@ -32,6 +35,22 @@ static object_type_t g_pipe_type;
 static void pipe_delete(object_t *o)
 {
     (void)o;
+}
+
+static void pipe_close(object_t *o, access_t acc)
+{
+    pipe_object_t *p = (pipe_object_t *)o;
+    spin_lock(&p->lock);
+    if (acc & FILE_WRITE_DATA) {
+        if (p->writers) p->writers--;
+        if (p->writers == 0) p->writer_closed = true;
+    }
+    if (acc & FILE_READ_DATA) {
+        if (p->readers) p->readers--;
+    }
+    int eof = p->writer_closed;
+    spin_unlock(&p->lock);
+    if (eof) disp_signal(&p->can_read, 1);
 }
 
 void pipe_init_type(void)
@@ -43,6 +62,7 @@ void pipe_init_type(void)
     g_pipe_type.generic_write = FILE_WRITE_DATA;
     g_pipe_type.generic_all = FILE_ALL_ACCESS;
     g_pipe_type.delete_fn = pipe_delete;
+    g_pipe_type.close_fn = pipe_close;
     g_pipe_type.waitable = true;
 }
 
@@ -55,8 +75,11 @@ status_t NtCreatePipe(handle_t *read_out, handle_t *write_out)
     disp_init(&p->can_read, DISP_NOTIFICATION_EVENT, 0);
     disp_init(&p->can_write, DISP_NOTIFICATION_EVENT, 1);
     p->hdr.wait = &p->can_read;
-    spin_init(&p->lock, "pipe", LOCK_RANK_DISP);
+    spin_init(&p->lock, "pipe", LOCK_RANK_OB);
     p->r = p->w = p->used = 0;
+    p->readers = 1;
+    p->writers = 1;
+    p->writer_closed = false;
     handle_table_t *t = ke_current_process() ? &ke_current_process()->handles : NULL;
     if (!t) { ob_dereference(&p->hdr); return STATUS_INVALID_HANDLE; }
     status_t st = ht_insert(t, &p->hdr, FILE_READ_DATA, read_out);
@@ -74,8 +97,10 @@ status_t pipe_read(object_t *o, void *buf, u64 n, u64 *got)
     while (done < n) {
         spin_lock(&p->lock);
         if (p->used == 0) {
+            int eof = p->writer_closed;
             spin_unlock(&p->lock);
             if (done) break;
+            if (eof) break;
             ke_wait_object(&p->can_read, (u64)-1);
             continue;
         }

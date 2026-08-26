@@ -25,8 +25,11 @@ Clone it. `make`. `make run`. That is how you boot it.
 - Waitable dispatcher objects (real sleeps, not spinlocks named mutex)
 - `syscall`/`sysret` ABI, NTSTATUS-shaped returns
 - VFS + ramfs, IRP-shaped I/O
-- Userland: `init`, `sh`, `ls`, `cat`, `echo`, `ps`, `crash`
+- Userland: kernel-linked `init/sh/ls/cat/echo/ps/crash` plus ET_EXEC `/bin/hello`
 - Host target that runs the same kernel C without QEMU (`make host`)
+- 0.6: IST IRQ frames, handle generation, SMEP/SMAP, syscall marshalling,
+  WaitForMultiple, pipe EOF, `/dev/console`
+
 
 ## Contracts (read these first)
 
@@ -52,7 +55,7 @@ make run
 ```
 qemu-system-x86_64 \
   -machine q35 \
-  -cpu qemu64,+syscall,+pae \
+  -cpu qemu64,+syscall,+pae,+smep,+smap \
   -m 256M \
   -serial stdio \
   -display none \

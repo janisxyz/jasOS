@@ -4,11 +4,60 @@
 #include <jasos/kprintf.h>
 #include <jasos/string.h>
 #include <jasos/status.h>
+#include <jasos/mm.h>
 
 static handle_table_t *cur_ht(void)
 {
     process_t *p = ke_current_process();
     return p ? &p->handles : NULL;
+}
+
+static bool caller_user(void)
+{
+    process_t *p = ke_current_process();
+    return p && p->user_mode;
+}
+
+static status_t sys_path(virt_t up, char *k, usize cap)
+{
+    if (!up) return STATUS_INVALID_PARAMETER;
+    if (caller_user()) return copyinstr(k, up, cap);
+    strlcpy(k, (const char *)(uintptr_t)up, cap);
+    return STATUS_SUCCESS;
+}
+
+static status_t sys_put_u64(virt_t up, u64 v)
+{
+    if (!up) return STATUS_INVALID_PARAMETER;
+    if (caller_user()) return copyout(up, &v, sizeof(v));
+    *(u64 *)(uintptr_t)up = v;
+    return STATUS_SUCCESS;
+}
+
+static status_t sys_put_handle(virt_t up, handle_t h)
+{
+    return sys_put_u64(up, h);
+}
+
+static status_t sys_opt_path(virt_t up, char *k, usize cap, const char **outp)
+{
+    if (!up) {
+        k[0] = 0;
+        *outp = NULL;
+        return STATUS_SUCCESS;
+    }
+    status_t st = sys_path(up, k, cap);
+    if (!NT_SUCCESS(st)) return st;
+    *outp = k;
+    return STATUS_SUCCESS;
+}
+
+static status_t sys_get_u64(virt_t up, u64 *out)
+{
+    if (!up || !out) return STATUS_INVALID_PARAMETER;
+    if (caller_user()) return copyin(out, up, sizeof(*out));
+    *out = *(const u64 *)(uintptr_t)up;
+    return STATUS_SUCCESS;
 }
 
 status_t NtClose(handle_t h)
@@ -49,7 +98,7 @@ status_t NtReadFile(handle_t h, void *buf, u64 n, u64 off, u64 *got)
 status_t NtWriteFile(handle_t h, const void *buf, u64 n, u64 off, u64 *put)
 {
     object_t *o;
-    status_t st = ht_lookup(cur_ht(), h, 0, 0, &o);
+    status_t st = ht_lookup(cur_ht(), h, FILE_WRITE_DATA, 0, &o);
     if (!NT_SUCCESS(st)) return st;
     if (o->type->kind == OBJ_PIPE) {
         st = pipe_write(o, buf, n, put);
@@ -247,7 +296,29 @@ status_t NtCreateThread(handle_t *out, void (*entry)(void *), void *arg, u32 pri
     process_t *p = ke_current_process();
     if (!p) return STATUS_INVALID_PARAMETER;
     thread_t *t;
-    status_t st = psp_create_thread(p, "user", entry, arg, prio, &t);
+    if (p->user_mode) {
+        /* User RIP is never called in kernel. SMEP would #PF it;
+           we refuse to even try. Allocate a stack, park the RIP on
+           the TCB, trampoline into enter_user. */
+#ifdef JASOS_HOST
+        (void)arg;
+        (void)prio;
+        return STATUS_NOT_IMPLEMENTED;
+#else
+        virt_t stack_base = 0;
+        status_t st = vmm_alloc_user(p, &stack_base, USER_STACK_SIZE - PAGE_SIZE,
+                                     PAGE_READWRITE, MEM_COMMIT);
+        if (!NT_SUCCESS(st)) return st;
+        st = psp_create_thread(p, "user", user_thread_entry, NULL, prio,
+                               CREATE_SUSPENDED, &t);
+        if (!NT_SUCCESS(st)) return st;
+        t->user_rip = (virt_t)(uintptr_t)entry;
+        t->user_rsp = stack_base + (USER_STACK_SIZE - PAGE_SIZE) - 16;
+        sched_ready(t);
+        return ht_insert(&p->handles, &t->hdr, THREAD_ALL_ACCESS, out);
+#endif
+    }
+    status_t st = psp_create_thread(p, "user", entry, arg, prio, 0, &t);
     if (!NT_SUCCESS(st)) return st;
     return ht_insert(&p->handles, &t->hdr, THREAD_ALL_ACCESS, out);
 }
@@ -287,6 +358,68 @@ status_t NtQueryInformationProcess(handle_t h, void *buf, u64 n)
     return STATUS_SUCCESS;
 }
 
+status_t NtWaitForMultipleObjects(handle_t *hs, u32 count, bool wait_all, u64 timeout_ticks)
+{
+    if (!hs || count == 0 || count > WAIT_OBJECTS_MAX)
+        return STATUS_INVALID_PARAMETER;
+    object_t *objs[WAIT_OBJECTS_MAX];
+    dispatcher_t *ds[WAIT_OBJECTS_MAX];
+    handle_table_t *t = cur_ht();
+    for (u32 i = 0; i < count; i++) {
+        status_t st = ht_lookup(t, hs[i], SYNCHRONIZE, 0, &objs[i]);
+        if (!NT_SUCCESS(st))
+            st = ht_lookup(t, hs[i], 0, 0, &objs[i]);
+        if (!NT_SUCCESS(st)) {
+            for (u32 j = 0; j < i; j++) ob_dereference(objs[j]);
+            return st;
+        }
+        if (!objs[i]->wait) {
+            for (u32 j = 0; j <= i; j++) ob_dereference(objs[j]);
+            return STATUS_INVALID_PARAMETER;
+        }
+        ds[i] = objs[i]->wait;
+    }
+    status_t st = ke_wait_multiple(ds, count, wait_all, timeout_ticks);
+    for (u32 i = 0; i < count; i++) ob_dereference(objs[i]);
+    return st;
+}
+
+status_t NtQueryVirtualMemory(handle_t proc, virt_t addr, void *buf, u64 n)
+{
+    if (!buf || n < sizeof(memory_basic_information_t))
+        return STATUS_INFO_LENGTH_MISMATCH;
+    process_t *p;
+    if (proc == HANDLE_CURRENT) p = ke_current_process();
+    else {
+        object_t *o;
+        status_t st = ht_lookup(cur_ht(), proc, PROCESS_QUERY_INFORMATION, OBJ_PROCESS, &o);
+        if (!NT_SUCCESS(st)) return st;
+        p = (process_t *)o;
+        ob_dereference(o);
+    }
+    if (!p) return STATUS_INVALID_HANDLE;
+    memory_basic_information_t inf;
+    memset(&inf, 0, sizeof(inf));
+    aspace_t *as = &p->aspace;
+    for (u32 i = 0; i < as->vad_count; i++) {
+        if (addr >= as->vads[i].start && addr < as->vads[i].end) {
+            inf.base = as->vads[i].start;
+            inf.alloc_base = as->vads[i].start;
+            inf.region_size = as->vads[i].end - as->vads[i].start;
+            inf.prot = as->vads[i].prot;
+            inf.type = as->vads[i].type;
+            inf.state = as->vads[i].committed ? MEM_COMMIT : MEM_RESERVE;
+            memcpy(buf, &inf, sizeof(inf));
+            return STATUS_SUCCESS;
+        }
+    }
+    inf.base = PAGE_ALIGN_DOWN(addr);
+    inf.region_size = PAGE_SIZE;
+    inf.state = 0;
+    memcpy(buf, &inf, sizeof(inf));
+    return STATUS_SUCCESS;
+}
+
 status_t syscall_from_entry(u64 *frame)
 {
     /* nr, a0, a1, a2, a3, a4, a5 */
@@ -302,40 +435,258 @@ status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5
     if (info) *info = 0;
     switch (nr) {
     case SYS_NtClose:              return NtClose((handle_t)a0);
-    case SYS_NtCreateFile:         return NtCreateFile((handle_t *)a0, (access_t)a1, (const char *)a2, (u32)a3, (u32)a4);
-    case SYS_NtReadFile:           return NtReadFile((handle_t)a0, (void *)a1, a2, a3, (u64 *)a4);
-    case SYS_NtWriteFile:          return NtWriteFile((handle_t)a0, (const void *)a1, a2, a3, (u64 *)a4);
-    case SYS_NtQueryDirectoryFile: return NtQueryDirectoryFile((handle_t)a0, (void *)a1, a2, a3 != 0);
+    case SYS_NtCreateFile: {
+        char path[PATH_MAX];
+        handle_t h = 0;
+        status_t st = sys_path((virt_t)a2, path, sizeof(path));
+        if (!NT_SUCCESS(st)) return st;
+        st = NtCreateFile(&h, (access_t)a1, path, (u32)a3, (u32)a4);
+        if (NT_SUCCESS(st)) {
+            status_t st2 = sys_put_handle((virt_t)a0, h);
+            if (!NT_SUCCESS(st2)) { NtClose(h); return st2; }
+        }
+        return st;
+    }
+    case SYS_NtReadFile: {
+        if (caller_user()) {
+            if (a2 > COPY_MAX) return STATUS_INVALID_PARAMETER;
+            void *kbuf = kalloc((usize)a2);
+            if (!kbuf) return STATUS_NO_MEMORY;
+            u64 got = 0;
+            status_t st = NtReadFile((handle_t)a0, kbuf, a2, a3, &got);
+            if (NT_SUCCESS(st) || st == STATUS_END_OF_FILE) {
+                status_t c = copyout((virt_t)a1, kbuf, got);
+                if (!NT_SUCCESS(c)) st = c;
+                if (a4) sys_put_u64((virt_t)a4, got);
+            }
+            kfree(kbuf);
+            return st;
+        }
+        return NtReadFile((handle_t)a0, (void *)a1, a2, a3, (u64 *)a4);
+    }
+    case SYS_NtWriteFile: {
+        if (caller_user()) {
+            if (a2 > COPY_MAX) return STATUS_INVALID_PARAMETER;
+            void *kbuf = kalloc((usize)a2);
+            if (!kbuf) return STATUS_NO_MEMORY;
+            status_t st = copyin(kbuf, (virt_t)a1, a2);
+            u64 put = 0;
+            if (NT_SUCCESS(st))
+                st = NtWriteFile((handle_t)a0, kbuf, a2, a3, &put);
+            if (a4) sys_put_u64((virt_t)a4, put);
+            kfree(kbuf);
+            return st;
+        }
+        return NtWriteFile((handle_t)a0, (const void *)a1, a2, a3, (u64 *)a4);
+    }
+    case SYS_NtSetCwd: {
+        char path[PATH_MAX];
+        status_t st = sys_path((virt_t)a0, path, sizeof(path));
+        if (!NT_SUCCESS(st)) return st;
+        return NtSetCwd(path);
+    }
+    case SYS_NtGetCwd: {
+        char path[PATH_MAX];
+        status_t st = NtGetCwd(path, sizeof(path));
+        if (!NT_SUCCESS(st)) return st;
+        usize n = strlen(path) + 1;
+        if (a1 < n) return STATUS_BUFFER_TOO_SMALL;
+        if (caller_user()) return copyout((virt_t)a0, path, n);
+        strlcpy((char *)(uintptr_t)a0, path, (usize)a1);
+        return STATUS_SUCCESS;
+    }
+    case SYS_NtCreateProcess: {
+        char path[PATH_MAX];
+        handle_t h = 0;
+        status_t st = sys_path((virt_t)a2, path, sizeof(path));
+        if (!NT_SUCCESS(st)) return st;
+        st = NtCreateProcess(&h, (access_t)a1, path, (u32)a3);
+        if (NT_SUCCESS(st)) {
+            status_t st2 = sys_put_handle((virt_t)a0, h);
+            if (!NT_SUCCESS(st2)) return st2;
+        }
+        return st;
+    }
+    case SYS_NtQueryDirectoryFile: {
+        if (caller_user()) {
+            if (a2 == 0 || a2 > SYSCALL_COPY_MAX) return STATUS_INVALID_PARAMETER;
+            void *kbuf = kalloc((usize)a2);
+            if (!kbuf) return STATUS_NO_MEMORY;
+            memset(kbuf, 0, (size_t)a2);
+            status_t st = NtQueryDirectoryFile((handle_t)a0, kbuf, a2, a3 != 0);
+            usize n = strlen((char *)kbuf);
+            if (n + 1 > a2) n = a2;
+            else n += 1;
+            if (NT_SUCCESS(st) || st == STATUS_END_OF_FILE)
+                copyout((virt_t)a1, kbuf, n);
+            kfree(kbuf);
+            return st;
+        }
+        return NtQueryDirectoryFile((handle_t)a0, (void *)a1, a2, a3 != 0);
+    }
     case SYS_NtTerminateProcess:   return NtTerminateProcess((handle_t)a0, (status_t)a1);
     case SYS_NtYieldExecution:     return NtYieldExecution();
     case SYS_NtDelayExecution:     return NtDelayExecution(a0);
-    case SYS_NtQuerySystemInformation: return NtQuerySystemInformation((u32)a0, (void *)a1, a2, (u64 *)a3);
-    case SYS_NtSetCwd:             return NtSetCwd((const char *)a0);
-    case SYS_NtGetCwd:             return NtGetCwd((char *)a0, a1);
-    case SYS_NtCreateEvent:        return NtCreateEvent((handle_t *)a0, (const char *)a1, a2 != 0, a3 != 0);
+    case SYS_NtQuerySystemInformation: {
+        if (caller_user()) {
+            if (a2 == 0 || a2 > SYSCALL_COPY_MAX) return STATUS_INVALID_PARAMETER;
+            void *kbuf = kalloc((usize)a2);
+            if (!kbuf) return STATUS_NO_MEMORY;
+            u64 got = 0;
+            status_t st = NtQuerySystemInformation((u32)a0, kbuf, a2, &got);
+            if (NT_SUCCESS(st) && got)
+                copyout((virt_t)a1, kbuf, got);
+            if (a3) sys_put_u64((virt_t)a3, got);
+            kfree(kbuf);
+            return st;
+        }
+        return NtQuerySystemInformation((u32)a0, (void *)a1, a2, (u64 *)a3);
+    }
+    case SYS_NtCreateEvent: {
+        char name[NAME_MAX];
+        const char *nm = NULL;
+        handle_t h = 0;
+        status_t st = sys_opt_path((virt_t)a1, name, sizeof(name), &nm);
+        if (!NT_SUCCESS(st)) return st;
+        st = NtCreateEvent(&h, nm, a2 != 0, a3 != 0);
+        if (NT_SUCCESS(st)) sys_put_handle((virt_t)a0, h);
+        return st;
+    }
     case SYS_NtSetEvent:           return NtSetEvent((handle_t)a0);
     case SYS_NtResetEvent:         return NtResetEvent((handle_t)a0);
-    case SYS_NtCreateMutex:        return NtCreateMutex((handle_t *)a0, (const char *)a1, a2 != 0);
+    case SYS_NtCreateMutex: {
+        char name[NAME_MAX];
+        const char *nm = NULL;
+        handle_t h = 0;
+        status_t st = sys_opt_path((virt_t)a1, name, sizeof(name), &nm);
+        if (!NT_SUCCESS(st)) return st;
+        st = NtCreateMutex(&h, nm, a2 != 0);
+        if (NT_SUCCESS(st)) sys_put_handle((virt_t)a0, h);
+        return st;
+    }
     case SYS_NtReleaseMutex:       return NtReleaseMutex((handle_t)a0);
     case SYS_NtWaitForSingleObject:return NtWaitForSingleObject((handle_t)a0, a1);
     case SYS_NtRaiseException:     return NtRaiseException((status_t)a0);
-    case SYS_NtCreateThread:       return NtCreateThread((handle_t *)a0, (void (*)(void *))a1, (void *)a2, (u32)a3);
-    case SYS_NtAllocateVirtualMemory: return NtAllocateVirtualMemory((handle_t)a0, (virt_t *)a1, a2, (u32)a3);
-    case SYS_NtQueryInformationProcess: return NtQueryInformationProcess((handle_t)a0, (void *)a1, a2);
-    case SYS_NtCreatePipe:         return NtCreatePipe((handle_t *)a0, (handle_t *)a1);
-    case SYS_NtCreateProcess:      return NtCreateProcess((handle_t *)a0, (access_t)a1, (const char *)a2, (u32)a3);
+    case SYS_NtCreateThread: {
+        handle_t h = 0;
+        status_t st = NtCreateThread(&h, (void (*)(void *))a1, (void *)a2, (u32)a3);
+        if (NT_SUCCESS(st)) sys_put_handle((virt_t)a0, h);
+        return st;
+    }
+    case SYS_NtAllocateVirtualMemory: {
+        virt_t base = 0;
+        status_t st = sys_get_u64((virt_t)a1, &base);
+        if (!NT_SUCCESS(st)) return st;
+        st = NtAllocateVirtualMemory((handle_t)a0, &base, a2, (u32)a3);
+        if (NT_SUCCESS(st)) sys_put_u64((virt_t)a1, base);
+        return st;
+    }
+    case SYS_NtQueryInformationProcess: {
+        if (caller_user()) {
+            if (a2 < sizeof(sys_process_info_t) || a2 > SYSCALL_COPY_MAX)
+                return STATUS_INFO_LENGTH_MISMATCH;
+            sys_process_info_t inf;
+            memset(&inf, 0, sizeof(inf));
+            status_t st = NtQueryInformationProcess((handle_t)a0, &inf, sizeof(inf));
+            if (NT_SUCCESS(st)) copyout((virt_t)a1, &inf, sizeof(inf));
+            return st;
+        }
+        return NtQueryInformationProcess((handle_t)a0, (void *)a1, a2);
+    }
+    case SYS_NtCreatePipe: {
+        handle_t r = 0, w = 0;
+        status_t st = NtCreatePipe(&r, &w);
+        if (NT_SUCCESS(st)) {
+            sys_put_handle((virt_t)a0, r);
+            sys_put_handle((virt_t)a1, w);
+        }
+        return st;
+    }
     case SYS_NtTerminateThread:    return NtTerminateThread((handle_t)a0, (status_t)a1);
-    case SYS_NtDuplicateObject:    return NtDuplicateObject((handle_t)a0, (handle_t)a1, (handle_t)a2, (handle_t *)a3, (access_t)a4);
-    case SYS_NtQueryObject:        return NtQueryObject((handle_t)a0, (void *)a1, a2);
-    case SYS_NtCreateSection:      return NtCreateSection((handle_t *)a0, (access_t)a1, a2, (u32)a3);
-    case SYS_NtMapViewOfSection:   return NtMapViewOfSection((handle_t)a0, (handle_t)a1, (virt_t *)a2, a3, (u32)a4);
+    case SYS_NtDuplicateObject: {
+        handle_t h = 0;
+        status_t st = NtDuplicateObject((handle_t)a0, (handle_t)a1, (handle_t)a2, &h, (access_t)a4);
+        if (NT_SUCCESS(st)) sys_put_handle((virt_t)a3, h);
+        return st;
+    }
+    case SYS_NtQueryObject: {
+        if (caller_user()) {
+            object_basic_information_t inf;
+            memset(&inf, 0, sizeof(inf));
+            status_t st = NtQueryObject((handle_t)a0, &inf, sizeof(inf));
+            if (NT_SUCCESS(st)) copyout((virt_t)a1, &inf, sizeof(inf));
+            return st;
+        }
+        return NtQueryObject((handle_t)a0, (void *)a1, a2);
+    }
+    case SYS_NtCreateSection: {
+        handle_t h = 0;
+        status_t st = NtCreateSection(&h, (access_t)a1, a2, (u32)a3);
+        if (NT_SUCCESS(st)) sys_put_handle((virt_t)a0, h);
+        return st;
+    }
+    case SYS_NtMapViewOfSection: {
+        virt_t base = 0;
+        status_t st = sys_get_u64((virt_t)a2, &base);
+        if (!NT_SUCCESS(st)) return st;
+        st = NtMapViewOfSection((handle_t)a0, (handle_t)a1, &base, a3, (u32)a4);
+        if (NT_SUCCESS(st)) sys_put_u64((virt_t)a2, base);
+        return st;
+    }
     case SYS_NtUnmapViewOfSection: return NtUnmapViewOfSection((handle_t)a0, (virt_t)a1);
     case SYS_NtFreeVirtualMemory:  return NtFreeVirtualMemory((handle_t)a0, (virt_t)a1, a2);
-    case SYS_NtCreateDirectoryObject: return NtCreateDirectoryObject((handle_t *)a0, (const char *)a1);
-    case SYS_NtOpenDirectoryObject:   return NtOpenDirectoryObject((handle_t *)a0, (const char *)a1);
-    case SYS_NtCreateTimer:        return NtCreateTimer((handle_t *)a0, (const char *)a1, a2 != 0);
+    case SYS_NtCreateDirectoryObject: {
+        char name[NAME_MAX];
+        const char *nm = NULL;
+        handle_t h = 0;
+        status_t st = sys_opt_path((virt_t)a1, name, sizeof(name), &nm);
+        if (!NT_SUCCESS(st)) return st;
+        st = NtCreateDirectoryObject(&h, nm);
+        if (NT_SUCCESS(st)) sys_put_handle((virt_t)a0, h);
+        return st;
+    }
+    case SYS_NtOpenDirectoryObject: {
+        char path[PATH_MAX];
+        handle_t h = 0;
+        status_t st = sys_path((virt_t)a1, path, sizeof(path));
+        if (!NT_SUCCESS(st)) return st;
+        st = NtOpenDirectoryObject(&h, path);
+        if (NT_SUCCESS(st)) sys_put_handle((virt_t)a0, h);
+        return st;
+    }
+    case SYS_NtCreateTimer: {
+        char name[NAME_MAX];
+        const char *nm = NULL;
+        handle_t h = 0;
+        status_t st = sys_opt_path((virt_t)a1, name, sizeof(name), &nm);
+        if (!NT_SUCCESS(st)) return st;
+        st = NtCreateTimer(&h, nm, a2 != 0);
+        if (NT_SUCCESS(st)) sys_put_handle((virt_t)a0, h);
+        return st;
+    }
     case SYS_NtSetTimer:           return NtSetTimer((handle_t)a0, a1, a2);
     case SYS_NtCancelTimer:        return NtCancelTimer((handle_t)a0);
+    case SYS_NtWaitForMultipleObjects: {
+        if (a1 == 0 || a1 > WAIT_OBJECTS_MAX) return STATUS_INVALID_PARAMETER;
+        handle_t hs[WAIT_OBJECTS_MAX];
+        if (caller_user()) {
+            status_t st = copyin(hs, (virt_t)a0, a1 * sizeof(handle_t));
+            if (!NT_SUCCESS(st)) return st;
+        } else {
+            memcpy(hs, (void *)(uintptr_t)a0, (size_t)(a1 * sizeof(handle_t)));
+        }
+        return NtWaitForMultipleObjects(hs, (u32)a1, a2 != 0, a3);
+    }
+    case SYS_NtQueryVirtualMemory: {
+        memory_basic_information_t inf;
+        memset(&inf, 0, sizeof(inf));
+        status_t st = NtQueryVirtualMemory((handle_t)a0, (virt_t)a1, &inf, sizeof(inf));
+        if (!NT_SUCCESS(st)) return st;
+        if (caller_user()) return copyout((virt_t)a2, &inf, sizeof(inf));
+        if (a3 < sizeof(inf)) return STATUS_INFO_LENGTH_MISMATCH;
+        memcpy((void *)(uintptr_t)a2, &inf, sizeof(inf));
+        return STATUS_SUCCESS;
+    }
     default:                       return STATUS_INVALID_SYSTEM_SERVICE;
     }
 }

@@ -167,3 +167,10 @@ is a bug. Mutexes are waitable; they sleep.
 
 none. Considered a handle table tree like Windows (3-level). Rejected
 until we have processes with > 1k handles; the array is honest.
+
+T6: handle value is `(generation << 16) | (index << 2)`. Generation is
+`u32` (32 bits in the handle). Slot 0 is reserved. Insert skips a wrap
+to generation 0 so a never-issued handle does not match. `ht_lookup_ex`
+snapshots the granted access under the table lock so `ht_duplicate`
+does not TOCTOU the access mask. `object_type.close_fn` runs from
+`ht_close` — pipes decrement writer/reader counts and signal EOF.

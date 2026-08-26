@@ -54,6 +54,7 @@ typedef struct dispatcher {
 struct object;
 
 typedef void (*obj_delete_fn)(struct object *);
+typedef void (*obj_close_fn)(struct object *, access_t);
 
 typedef struct object_type {
     const char   *name;
@@ -64,6 +65,7 @@ typedef struct object_type {
     access_t      generic_execute;
     access_t      generic_all;
     obj_delete_fn delete_fn;
+    obj_close_fn  close_fn;
     bool          waitable;
 } object_type_t;
 
@@ -122,7 +124,7 @@ typedef struct handle_entry {
     access_t  access;
     u8        inherit;
     u8        protect_close;
-    u16       generation;
+    u32       generation;
 } handle_entry_t;
 
 typedef struct handle_table {
@@ -155,6 +157,7 @@ void     ht_init(handle_table_t *t);
 void     ht_destroy(handle_table_t *t);
 status_t ht_insert(handle_table_t *t, object_t *o, access_t access, handle_t *out);
 status_t ht_lookup(handle_table_t *t, handle_t h, access_t required, object_kind_t expect, object_t **out);
+status_t ht_lookup_ex(handle_table_t *t, handle_t h, access_t required, object_kind_t expect, object_t **out, access_t *granted);
 status_t ht_close(handle_table_t *t, handle_t h);
 status_t ht_duplicate(handle_table_t *src, handle_t h, handle_table_t *dst, access_t access, handle_t *out);
 access_t ob_map_generic(object_type_t *type, access_t access);

@@ -40,7 +40,8 @@
 #define SYS_NtCreateTimer              33
 #define SYS_NtSetTimer                 34
 #define SYS_NtCancelTimer              35
-#define SYS_MAX                        36
+#define SYS_NtWaitForMultipleObjects   36
+#define SYS_MAX                        37
 
 status_t syscall_dispatch(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 *info);
 
@@ -80,6 +81,8 @@ status_t NtOpenDirectoryObject(handle_t *out, const char *path);
 status_t NtCreateTimer(handle_t *out, const char *name, bool auto_reset);
 status_t NtSetTimer(handle_t h, u64 due_ticks, u64 period);
 status_t NtCancelTimer(handle_t h);
+status_t NtWaitForMultipleObjects(handle_t *hs, u32 count, bool wait_all, u64 timeout_ticks);
+status_t NtQueryVirtualMemory(handle_t proc, virt_t addr, void *buf, u64 n);
 
 typedef struct sys_process_info {
     kpid_t pid;
@@ -102,3 +105,12 @@ typedef struct object_basic_information {
     char type_name[32];
     char name[NAME_MAX];
 } object_basic_information_t;
+
+typedef struct memory_basic_information {
+    virt_t base;
+    virt_t alloc_base;
+    u64    region_size;
+    u32    prot;
+    u32    type;
+    u32    state;
+} memory_basic_information_t;

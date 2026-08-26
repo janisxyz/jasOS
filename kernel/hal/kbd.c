@@ -37,9 +37,9 @@ static const char map_shift[128] = {
 void kbd_isr(void)
 {
     u8 sc = inb(0x60);
-    if (sc == 0x2A || sc == 0x36) { g_shift = 1; goto eoi; }
-    if (sc == 0xAA || sc == 0xB6) { g_shift = 0; goto eoi; }
-    if (sc & 0x80) goto eoi;
+    if (sc == 0x2A || sc == 0x36) { g_shift = 1; return; }
+    if (sc == 0xAA || sc == 0xB6) { g_shift = 0; return; }
+    if (sc & 0x80) return;
     char c = g_shift ? map_shift[sc] : map[sc];
     if (c) {
         u32 n = (g_kbd_w + 1) % KBD_BUF;
@@ -48,8 +48,6 @@ void kbd_isr(void)
             g_kbd_w = n;
         }
     }
-eoi:
-    __asm__ volatile("outb %0, %1" :: "a"((u8)0x20), "Nd"((u16)0x20));
 }
 
 int kbd_getchar(void)
