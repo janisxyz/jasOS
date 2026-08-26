@@ -135,5 +135,11 @@ T6: `vmm_unmap` frees the frame (it used to leak). `vmm_aspace_destroy`
 walks user PML4[0..255], frees leftover leaves + tables, leaves kernel
 half shared. Hardware `copyin`/`copyout`/`copyinstr` go through
 `vmm_read_aspace`/`vmm_write_aspace` (HHDM), not user VA + STAC.
-`vmm_handle_user_fault` demand-zeros a missing PTE inside a committed
-VAD; a PF outside a VAD kills the thread.
+T7: kernel linker splits RX (text+rodata) and RW+NX (data+bss) on a
+2 MiB boundary (`_rx_end`). `vmm_init` maps pages below `_rx_end`
+without `PTE_W`, pages at/after it with `PTE_W|PTE_NX`. ELF PHDRs are
+`PF_R|PF_X` and `PF_R|PF_W` — the RWX LOAD warning is gone. Residual:
+HHDM still maps the kernel's physical pages writable. A kernel bug
+that writes through HHDM can still clobber .text. Closing that is
+excluding the kernel image from the HHDM or mapping it NX there.
+

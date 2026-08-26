@@ -114,7 +114,7 @@ kernel: build build/hello_blob.h
 	  echo "  AS  $$f"; \
 	  $(CROSS)$(CC) $(KERNEL_ASFLAGS) $$f -o build/obj/$$(echo $$f | tr / _).o || exit 1; \
 	done
-	$(CROSS)$(LD) -nostdlib -z max-page-size=0x1000 -T kernel/linker.ld \
+	$(CROSS)$(LD) -nostdlib -z max-page-size=0x1000 -z separate-code -T kernel/linker.ld \
 	  -Map build/kernel.map -o build/kernel.elf \
 	  $$(for f in $(KERNEL_C) $(KERNEL_S); do echo build/obj/$$(echo $$f | tr / _).o; done)
 	@echo "kernel: build/kernel.elf"

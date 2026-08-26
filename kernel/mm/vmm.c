@@ -187,9 +187,17 @@ void vmm_init(phys_t kphys, u64 ksize)
     u64 kpages2m = (PAGE_ALIGN_UP(ksize + (kphys & 0x1FFFFF)) + 0x1FFFFF) / 0x200000;
     if (kpages2m < 2) kpages2m = 2;
     phys_t kbase = kphys & ~0x1FFFFFULL;
+    extern u8 _rx_end[];
     for (u64 i = 0; i < kpages2m && i < 512; i++) {
-        kpd[i] = (kbase + i * 0x200000ULL) | PTE_P | PTE_W | PTE_PS | PTE_G;
+        virt_t page_va = KERNEL_VMA + i * 0x200000ULL;
+        u64 flags = PTE_P | PTE_PS | PTE_G;
+        if (page_va >= (virt_t)(uintptr_t)_rx_end)
+            flags |= PTE_W | PTE_NX;
+        kpd[i] = (kbase + i * 0x200000ULL) | flags;
     }
+    kprintf("vmm: kernel RX .. %llx RW-NX after\n",
+            (unsigned long long)(uintptr_t)_rx_end);
+
 
     /* Recursive slot. */
     pml4[RECURSIVE_SLOT] = cr3 | PTE_P | PTE_W;
