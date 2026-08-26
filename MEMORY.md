@@ -226,3 +226,7 @@ deref. No new VADs.
 
 
 
+
+T19: ls/cat ELF images are additional ramfs blobs. No VMM change.
+Token inherit does not allocate extra aspace.
+

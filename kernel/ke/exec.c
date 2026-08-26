@@ -9,17 +9,11 @@
 /*
  * Image spawn. A path is either a known kernel-linked builtin (/bin/sh
  * and friends) or an ELF64 ET_EXEC. Builtins exist because the shell
- * and utilities still share the kernel C until they are fully ring-3.
- * /bin/hello is a real ELF: on hardware the primary thread iretq's to
- * 0x400000; on host we cannot enter ring 3 so a stub thread reports
- * the load and exits.
+ * still shares the kernel C until it is fully ring-3.
+ * /bin/hello, /bin/echo, /bin/ls, /bin/cat, /bin/ps, /bin/crash are real ELF.
  */
 
 extern int sh_main(int argc, char **argv);
-extern int ls_main(int argc, char **argv);
-extern int cat_main(int argc, char **argv);
-extern int ps_main(int argc, char **argv);
-extern int crash_main(int argc, char **argv);
 
 typedef struct builtin {
     const char *path;
@@ -28,10 +22,6 @@ typedef struct builtin {
 
 static const builtin_t g_builtins[] = {
     { "/bin/sh",    sh_main },
-    { "/bin/ls",    ls_main },
-    { "/bin/cat",   cat_main },
-    { "/bin/ps",    ps_main },
-    { "/bin/crash", crash_main },
 };
 
 int builtin_lookup(const char *path, int (**mainfn)(int, char **))

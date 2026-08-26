@@ -1077,6 +1077,27 @@ int selftest_run(void)
         st = NtQueryInformationToken(th_copy, &inf, sizeof(inf));
         EXPECT(NT_SUCCESS(st) && inf.integrity == 1, "duplicate token independent");
 
+        /* T19: spawn from a dropped parent cannot raise. */
+        object_t *po2 = NULL;
+        st = ht_lookup(&psp_system_process()->handles, ph, 0, OBJ_PROCESS, &po2);
+        EXPECT(NT_SUCCESS(st) && po2, "dropped proc lookup");
+        process_t *dropped = (process_t *)po2;
+        EXPECT(dropped->token && dropped->token->integrity == 0,
+               "parent token still dropped");
+        process_t *child = NULL;
+        st = psp_create_process("/bin/hello", dropped, &child);
+        EXPECT(NT_SUCCESS(st) && child && child->token, "inherit spawn");
+        EXPECT(child->token->integrity == 0, "child inherits dropped integrity");
+        EXPECT(child->token->pid == child->pid, "inherited token pid is child");
+        ob_dereference(&child->hdr);
+        ob_dereference(po2);
+
+        process_t *admin_child = NULL;
+        st = psp_create_process("/bin/hello", psp_system_process(), &admin_child);
+        EXPECT(NT_SUCCESS(st) && admin_child && admin_child->token, "system spawn");
+        EXPECT(admin_child->token->integrity == 1, "system child still admin");
+        ob_dereference(&admin_child->hdr);
+
         NtClose(th);
         NtClose(th_dup_only);
         NtClose(th_copy);
@@ -1084,6 +1105,92 @@ int selftest_run(void)
         NtClose(selftok);
         NtClose(ph);
         NtClose(ph_term);
+    }
+
+    /* T19: /bin/ls and /bin/cat are ET_EXEC, not kernel builtins. */
+    {
+        EXPECT(!builtin_lookup("/bin/ls", NULL), "ls not a kernel builtin");
+        EXPECT(!builtin_lookup("/bin/cat", NULL), "cat not a kernel builtin");
+        EXPECT(builtin_lookup("/bin/sh", NULL), "sh still a kernel builtin");
+        u8 *bytes = NULL;
+        u64 len = 0;
+        st = vfs_read_all("/bin/ls", &bytes, &len);
+        EXPECT(NT_SUCCESS(st) && bytes && len > 64, "ls vfs blob");
+        EXPECT(bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' &&
+               bytes[3] == 'F', "ls is ELF");
+        kfree(bytes);
+        bytes = NULL; len = 0;
+        st = vfs_read_all("/bin/cat", &bytes, &len);
+        EXPECT(NT_SUCCESS(st) && bytes && len > 64, "cat vfs blob");
+        EXPECT(bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' &&
+               bytes[3] == 'F', "cat is ELF");
+        kfree(bytes);
+
+        handle_t lh = 0;
+        const char *lav[] = { "/bin/ls", "/etc" };
+        st = NtCreateProcessEx(&lh, PROCESS_ALL_ACCESS, "/bin/ls", CREATE_SUSPENDED,
+                               lav, 2);
+        EXPECT(NT_SUCCESS(st) && lh, "ls process");
+        object_t *lo = NULL;
+        st = ht_lookup(&psp_system_process()->handles, lh, 0, OBJ_PROCESS, &lo);
+        EXPECT(NT_SUCCESS(st) && lo, "ls process lookup");
+        process_t *lp = (process_t *)lo;
+        EXPECT(lp->user_mode, "ls is user_mode");
+        EXPECT(lp->argc == 2, "ls argc 2");
+        EXPECT(strcmp(lp->argv[1], "/etc") == 0, "ls argv1 path");
+        EXPECT(lp->token && lp->token->integrity == 1, "ls from system is admin");
+        ob_dereference(lo);
+        NtClose(lh);
+
+        handle_t ch = 0;
+        const char *cav[] = { "/bin/cat", "/etc/hostname" };
+        st = NtCreateProcessEx(&ch, PROCESS_ALL_ACCESS, "/bin/cat", CREATE_SUSPENDED,
+                               cav, 2);
+        EXPECT(NT_SUCCESS(st) && ch, "cat process");
+        object_t *co = NULL;
+        st = ht_lookup(&psp_system_process()->handles, ch, 0, OBJ_PROCESS, &co);
+        EXPECT(NT_SUCCESS(st) && co, "cat process lookup");
+        process_t *cp = (process_t *)co;
+        EXPECT(cp->user_mode, "cat is user_mode");
+        EXPECT(cp->argc == 2 && strcmp(cp->argv[1], "/etc/hostname") == 0,
+               "cat argv1 file");
+        ob_dereference(co);
+        NtClose(ch);
+
+        EXPECT(!builtin_lookup("/bin/ps", NULL), "ps not a kernel builtin");
+        bytes = NULL; len = 0;
+        st = vfs_read_all("/bin/ps", &bytes, &len);
+        EXPECT(NT_SUCCESS(st) && bytes && len > 64, "ps vfs blob");
+        EXPECT(bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' &&
+               bytes[3] == 'F', "ps is ELF");
+        kfree(bytes);
+        handle_t psh = 0;
+        st = NtCreateProcess(&psh, PROCESS_ALL_ACCESS, "/bin/ps", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st) && psh, "ps process");
+        object_t *pso = NULL;
+        st = ht_lookup(&psp_system_process()->handles, psh, 0, OBJ_PROCESS, &pso);
+        EXPECT(NT_SUCCESS(st) && pso, "ps process lookup");
+        process_t *psp = (process_t *)pso;
+        EXPECT(psp->user_mode, "ps is user_mode");
+        ob_dereference(pso);
+        NtClose(psh);
+
+        EXPECT(!builtin_lookup("/bin/crash", NULL), "crash not a kernel builtin");
+        bytes = NULL; len = 0;
+        st = vfs_read_all("/bin/crash", &bytes, &len);
+        EXPECT(NT_SUCCESS(st) && bytes && len > 64, "crash vfs blob");
+        EXPECT(bytes[0] == 0x7f && bytes[1] == 'E' && bytes[2] == 'L' &&
+               bytes[3] == 'F', "crash is ELF");
+        kfree(bytes);
+        handle_t crh = 0;
+        st = NtCreateProcess(&crh, PROCESS_ALL_ACCESS, "/bin/crash", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st) && crh, "crash process");
+        object_t *cro = NULL;
+        st = ht_lookup(&psp_system_process()->handles, crh, 0, OBJ_PROCESS, &cro);
+        EXPECT(NT_SUCCESS(st) && cro, "crash process lookup");
+        EXPECT(((process_t *)cro)->user_mode, "crash is user_mode");
+        ob_dereference(cro);
+        NtClose(crh);
     }
 
     kprintf("selftest: all assertions passed\n");

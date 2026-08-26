@@ -217,3 +217,10 @@ integrity. Raising is `ACCESS_DENIED`. No privileges bitmap.
 
 
 
+
+
+T19: child Token integrity is a snapshot of the parent Token at
+`psp_create_process`. Drop is sticky across spawn. `/bin/ls` and
+`/bin/cat` are Process objects whose image is an ELF section map,
+not kernel builtins.
+

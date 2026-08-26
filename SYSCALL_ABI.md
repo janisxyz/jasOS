@@ -213,3 +213,8 @@ T18 start: syscall 41 `NtSetInformationToken` a0 token a1 integrity
 
 
 
+
+T19: no new syscall. `NtCreateProcess` still mints the child token from the
+*parent process object*, not from a token handle the caller passed.
+`/bin/ls` and `/bin/cat` go through syscall 6 like `/bin/echo`.
+

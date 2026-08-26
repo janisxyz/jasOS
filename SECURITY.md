@@ -88,3 +88,11 @@ closed vs residual.
 skips the serial spinlock. `spin_lock` will not spin forever. The
 dump includes thread name, pid, ticks, irql, held rank. Then `hlt`.
 We do not "recover". A recovered kernel after DF is a lying kernel.
+
+| Spawn re-elevated after drop | T19: child integrity = parent integrity (clamped 0..1) |
+| `/bin/ls` `/bin/cat` kernel-linked | unlinked; ET_EXEC + ntdll |
+
+T19 residual update: kernel-linked remainder is init/sh/ps/crash. Drop is
+sticky on spawn. integrity still *starts* at 1 for System and its
+undropped children. No Se* bitmap. envp is still one NULL.
+

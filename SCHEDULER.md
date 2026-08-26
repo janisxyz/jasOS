@@ -167,3 +167,7 @@ READY/RUNNING).
 
 
 
+
+T19: `psp_create_process` snapshots `parent->token->integrity` onto the
+new token. No ready-queue change.
+

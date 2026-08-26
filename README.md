@@ -25,7 +25,7 @@ Clone it. `make`. `make run`. That is how you boot it.
 - Waitable dispatcher objects (real sleeps, not spinlocks named mutex)
 - `syscall`/`sysret` ABI, NTSTATUS-shaped returns
 - VFS + ramfs, IRP-shaped I/O
-- Userland: kernel-linked `init/sh/ls/cat/echo/ps/crash` plus ET_EXEC `/bin/hello`
+- Userland: kernel-linked `init/sh` plus ET_EXEC `/bin/hello` `/bin/echo` `/bin/ls` `/bin/cat` `/bin/ps` `/bin/crash`
 - Host target that runs the same kernel C without QEMU (`make host`)
 - 0.6: IST IRQ frames, handle generation, SMEP/SMAP, syscall marshalling,
   WaitForMultiple, pipe EOF, `/dev/console`
@@ -47,6 +47,8 @@ Clone it. `make`. `make run`. That is how you boot it.
 - 0.16: `NtCreateProcess` argv on the user stack (cap 16×128); Token
   is `OBJ_TOKEN` with open/query/dup; drop-only integrity; System
   pid 0 has a token
+- 0.17: child token inherits parent integrity (drop is sticky);
+  `/bin/ls` `/bin/cat` `/bin/ps` `/bin/crash` are ET_EXEC
 
 
 

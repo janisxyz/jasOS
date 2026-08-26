@@ -314,3 +314,23 @@ Residual (T14): protect still will not walk a run of mixed-prot VADs in one call
 - Pipe last-writer EOF via `object_type.close_fn`.
 - `/dev/console` CHAR vnode. User ELF `/bin/hello` at 0x400000 with ntdll + libc printf/malloc.
 - Kernel stack canary page (0xA5). Hardware unmapped kstack VA is residual — heap pages cannot punch a not-present hole.
+
+| T19 | Child token inherits parent integrity | T18 drop was a lie: spawn always minted integrity 1 |
+| T19 | `/bin/ls` `/bin/cat` are ET_EXEC | unlinked from kernel.elf; ntdll + libc; sh builtin echo remains ring 0 |
+
+---
+
+## T19 surface (0.17.0)
+
+- `psp_create_process` copies `parent->token->integrity` (clamped to 0..1). A dropped parent cannot spawn an admin child. System pid 0 still starts at 1; children of System stay 1 until someone drops.
+- `/bin/ls` and `/bin/cat` are ET_EXEC at 0x400000, seeded from `ls_elf_blob` / `cat_elf_blob`. Not in `g_builtins`. Host cannot enter ring 3 so `elf_host_stub` reports the load; hardware `user_launch` iretq's.
+- Residual: envp is still a single NULL. sh/init remain kernel-linked. No privileges bitmap. integrity still *starts* at 1 (until logon). Duplicate token does not impersonate.
+
+
+T20 start (shipped in 0.17): `/bin/ps` is ET_EXEC. `NtQuerySystemInformation`
+class 5 from ring 3. Remainder kernel-linked: init/sh/crash.
+
+
+T21 start (shipped in 0.17): `/bin/crash` is ET_EXEC. `NtRaiseException` from
+ring 3 kills the thread. sh still has a ring-0 `crash` builtin command.
+

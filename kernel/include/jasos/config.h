@@ -3,9 +3,9 @@
 #include <jasos/types.h>
 
 #define JASOS_VERSION_MAJOR  0
-#define JASOS_VERSION_MINOR  16
+#define JASOS_VERSION_MINOR  17
 #define JASOS_VERSION_PATCH  0
-#define JASOS_VERSION_STR    "0.16.0-aegis"
+#define JASOS_VERSION_STR    "0.17.0-aegis"
 
 
 #define PAGE_SHIFT           12u

@@ -1,10 +1,16 @@
 #include <jasos/syscall.h>
-#include <jasos/kprintf.h>
+#include <jasos/status.h>
 
-int crash_main(int argc, char **argv)
+int printf(const char *fmt, ...);
+
+/*
+ * Ring-3 crash. ET_EXEC. NtRaiseException kills the thread, not the kernel.
+ */
+int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
-    kprintf("crash: raising STATUS_ACCESS_VIOLATION\n");
+    (void)argc;
+    (void)argv;
+    printf("crash: raising ACCESS_VIOLATION\n");
     NtRaiseException(STATUS_ACCESS_VIOLATION);
     return 1;
 }

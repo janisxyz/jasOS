@@ -47,11 +47,7 @@ KERNEL_C = \
 	kernel/fs/vfs.c \
 	kernel/fs/elf.c \
 	user/bin/init.c \
-	user/bin/sh.c \
-	user/bin/ls.c \
-	user/bin/cat.c \
-	user/bin/ps.c \
-	user/bin/crash.c
+	user/bin/sh.c
 
 KERNEL_S = \
 	kernel/boot/entry.S \
@@ -86,10 +82,6 @@ HOST_C = \
 	kernel/fs/elf.c \
 	user/bin/init.c \
 	user/bin/sh.c \
-	user/bin/ls.c \
-	user/bin/cat.c \
-	user/bin/ps.c \
-	user/bin/crash.c \
 	host/main.c \
 	host/selftest.c
 
@@ -127,6 +119,10 @@ user: build
 	$(CROSS)$(CC) $(USER_CFLAGS) -c user/ntdll/ntdll.S -o build/userobj/ntdll.o
 	$(CROSS)$(CC) $(USER_CFLAGS) -c user/bin/hello.c -o build/userobj/hello.o
 	$(CROSS)$(CC) $(USER_CFLAGS) -c user/bin/echo.c -o build/userobj/echo.o
+	$(CROSS)$(CC) $(USER_CFLAGS) -c user/bin/ls.c -o build/userobj/ls.o
+	$(CROSS)$(CC) $(USER_CFLAGS) -c user/bin/cat.c -o build/userobj/cat.o
+	$(CROSS)$(CC) $(USER_CFLAGS) -c user/bin/ps.c -o build/userobj/ps.o
+	$(CROSS)$(CC) $(USER_CFLAGS) -c user/bin/crash.c -o build/userobj/crash.o
 	$(CROSS)$(CC) $(USER_CFLAGS) -c user/libc/printf.c -o build/userobj/printf.o
 	$(CROSS)$(CC) $(USER_CFLAGS) -c user/libc/malloc.c -o build/userobj/malloc.o
 	$(CROSS)$(CC) $(USER_CFLAGS) -c kernel/lib/string.c -o build/userobj/string.o
@@ -136,13 +132,29 @@ user: build
 	$(CROSS)$(LD) -nostdlib -T user/linker.ld -o build/initrd/echo \
 	  build/userobj/crt0.o build/userobj/ntdll.o build/userobj/echo.o \
 	  build/userobj/printf.o build/userobj/malloc.o build/userobj/string.o
+	$(CROSS)$(LD) -nostdlib -T user/linker.ld -o build/initrd/ls \
+	  build/userobj/crt0.o build/userobj/ntdll.o build/userobj/ls.o \
+	  build/userobj/printf.o build/userobj/malloc.o build/userobj/string.o
+	$(CROSS)$(LD) -nostdlib -T user/linker.ld -o build/initrd/cat \
+	  build/userobj/crt0.o build/userobj/ntdll.o build/userobj/cat.o \
+	  build/userobj/printf.o build/userobj/malloc.o build/userobj/string.o
+	$(CROSS)$(LD) -nostdlib -T user/linker.ld -o build/initrd/ps \
+	  build/userobj/crt0.o build/userobj/ntdll.o build/userobj/ps.o \
+	  build/userobj/printf.o build/userobj/malloc.o build/userobj/string.o
+	$(CROSS)$(LD) -nostdlib -T user/linker.ld -o build/initrd/crash \
+	  build/userobj/crt0.o build/userobj/ntdll.o build/userobj/crash.o \
+	  build/userobj/printf.o build/userobj/malloc.o build/userobj/string.o
 	python3 scripts/embed_elf.py build/initrd/hello build/hello_blob.h hello_elf_blob
 	python3 scripts/embed_elf.py build/initrd/echo build/echo_blob.h echo_elf_blob
-	@echo "user: build/initrd/hello build/initrd/echo"
-	@ls -l build/initrd/hello build/initrd/echo
-	@file build/initrd/hello build/initrd/echo || true
+	python3 scripts/embed_elf.py build/initrd/ls build/ls_blob.h ls_elf_blob
+	python3 scripts/embed_elf.py build/initrd/cat build/cat_blob.h cat_elf_blob
+	python3 scripts/embed_elf.py build/initrd/ps build/ps_blob.h ps_elf_blob
+	python3 scripts/embed_elf.py build/initrd/crash build/crash_blob.h crash_elf_blob
+	@echo "user: hello echo ls cat ps crash"
+	@ls -l build/initrd/hello build/initrd/echo build/initrd/ls build/initrd/cat build/initrd/ps build/initrd/crash
+	@file build/initrd/hello build/initrd/echo build/initrd/ls build/initrd/cat build/initrd/ps build/initrd/crash || true
 
-build/hello_blob.h build/echo_blob.h:
+build/hello_blob.h build/echo_blob.h build/ls_blob.h build/cat_blob.h build/ps_blob.h build/crash_blob.h:
 	mkdir -p build
 	@if [ ! -f build/hello_blob.h ]; then \
 	  printf '%s\n' '/* stub until make user */' \
@@ -153,6 +165,26 @@ build/hello_blob.h build/echo_blob.h:
 	  printf '%s\n' '/* stub until make user */' \
 	    'static const unsigned char echo_elf_blob[] = {0};' \
 	    'static const unsigned int echo_elf_blob_len = 0;' > build/echo_blob.h; \
+	fi
+	@if [ ! -f build/ls_blob.h ]; then \
+	  printf '%s\n' '/* stub until make user */' \
+	    'static const unsigned char ls_elf_blob[] = {0};' \
+	    'static const unsigned int ls_elf_blob_len = 0;' > build/ls_blob.h; \
+	fi
+	@if [ ! -f build/cat_blob.h ]; then \
+	  printf '%s\n' '/* stub until make user */' \
+	    'static const unsigned char cat_elf_blob[] = {0};' \
+	    'static const unsigned int cat_elf_blob_len = 0;' > build/cat_blob.h; \
+	fi
+	@if [ ! -f build/ps_blob.h ]; then \
+	  printf '%s\n' '/* stub until make user */' \
+	    'static const unsigned char ps_elf_blob[] = {0};' \
+	    'static const unsigned int ps_elf_blob_len = 0;' > build/ps_blob.h; \
+	fi
+	@if [ ! -f build/crash_blob.h ]; then \
+	  printf '%s\n' '/* stub until make user */' \
+	    'static const unsigned char crash_elf_blob[] = {0};' \
+	    'static const unsigned int crash_elf_blob_len = 0;' > build/crash_blob.h; \
 	fi
 
 run: kernel

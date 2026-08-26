@@ -163,3 +163,11 @@ user/                   libc subset + init/sh/ls/cat/echo/ps/crash + hello
 host/                   POSIX HAL + host entry
 scripts/                embed_elf.py
 ```
+
+0.17 selftest also covers child token inherit after parent drop (cannot
+spawn up), System child still admin, `/bin/ls` and `/bin/cat` as ELF
+(not kernel builtins), and argv on those images.
+
+
+0.17 also covers `/bin/ps` as ELF (T20 start).
+

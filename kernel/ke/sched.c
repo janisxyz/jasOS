@@ -552,7 +552,13 @@ status_t psp_create_process(const char *image, process_t *parent, process_t **ou
         }
         token_object_t *t = (token_object_t *)tok;
         t->pid = p->pid;
-        t->integrity = 1; /* admin until logon exists — do not claim otherwise */
+        /* T19: inherit parent integrity. Drop is sticky; spawn cannot raise. */
+        u32 integ = 1;
+        if (parent && parent->token) {
+            integ = parent->token->integrity;
+            if (integ > 1) integ = 1;
+        }
+        t->integrity = integ;
         p->token = t;
     }
     if (g_nprocs < MAX_PROCESSES) {

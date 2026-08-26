@@ -16,6 +16,22 @@
 #    include "echo_blob.h"
 #    define HAVE_ECHO_BLOB 1
 #  endif
+#  if __has_include("ls_blob.h")
+#    include "ls_blob.h"
+#    define HAVE_LS_BLOB 1
+#  endif
+#  if __has_include("cat_blob.h")
+#    include "cat_blob.h"
+#    define HAVE_CAT_BLOB 1
+#  endif
+#  if __has_include("ps_blob.h")
+#    include "ps_blob.h"
+#    define HAVE_PS_BLOB 1
+#  endif
+#  if __has_include("crash_blob.h")
+#    include "crash_blob.h"
+#    define HAVE_CRASH_BLOB 1
+#  endif
 #endif
 
 static vnode_t    *g_root_vnode;
@@ -431,10 +447,6 @@ status_t vfs_seed_initrd(void)
     seed_file("/usr/share/welcome",
               "Welcome to jasOS.\nThis is an operating system, not a website.\n");
     seed_file("/bin/sh", "BUILTIN\n");
-    seed_file("/bin/ls", "BUILTIN\n");
-    seed_file("/bin/cat", "BUILTIN\n");
-    seed_file("/bin/ps", "BUILTIN\n");
-    seed_file("/bin/crash", "BUILTIN\n");
     {
 #ifdef HAVE_HELLO_BLOB
         if (hello_elf_blob_len > 64)
@@ -455,6 +467,46 @@ status_t vfs_seed_initrd(void)
 #endif
         {
             seed_file("/bin/echo", "MISSING_ELF\n");
+        }
+    }
+    {
+#ifdef HAVE_LS_BLOB
+        if (ls_elf_blob_len > 64)
+            vfs_write_bytes("/bin/ls", ls_elf_blob, ls_elf_blob_len);
+        else
+#endif
+        {
+            seed_file("/bin/ls", "MISSING_ELF\n");
+        }
+    }
+    {
+#ifdef HAVE_CAT_BLOB
+        if (cat_elf_blob_len > 64)
+            vfs_write_bytes("/bin/cat", cat_elf_blob, cat_elf_blob_len);
+        else
+#endif
+        {
+            seed_file("/bin/cat", "MISSING_ELF\n");
+        }
+    }
+    {
+#ifdef HAVE_PS_BLOB
+        if (ps_elf_blob_len > 64)
+            vfs_write_bytes("/bin/ps", ps_elf_blob, ps_elf_blob_len);
+        else
+#endif
+        {
+            seed_file("/bin/ps", "MISSING_ELF\n");
+        }
+    }
+    {
+#ifdef HAVE_CRASH_BLOB
+        if (crash_elf_blob_len > 64)
+            vfs_write_bytes("/bin/crash", crash_elf_blob, crash_elf_blob_len);
+        else
+#endif
+        {
+            seed_file("/bin/crash", "MISSING_ELF\n");
         }
     }
     kprintf("vfs: initrd /bin /etc /tmp /proc /dev\n");
