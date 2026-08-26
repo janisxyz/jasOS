@@ -155,4 +155,11 @@ still uses the `0xA5` canary because it has no PTEs. Heap returns
 maps kernel `.data` and the rest of RAM writable — that is the
 direct map, not a hole. IST stacks remain in `.bss`.
 
+T9: IST1–4 relocated off `.bss` to `IST_STACK_BASE` (past the thread
+kstack region) via `vmm_map_guarded_stack` after `vmm_init`, before
+`sti`. Each has a not-present guard. Recursive PML4 slot is `PTE_NX`.
+Residual: the `.bss` IST arrays are still linked; they are dead after
+`tss_map_ist`.
+
+
 

@@ -3,9 +3,9 @@
 #include <jasos/types.h>
 
 #define JASOS_VERSION_MAJOR  0
-#define JASOS_VERSION_MINOR  8
+#define JASOS_VERSION_MINOR  9
 #define JASOS_VERSION_PATCH  0
-#define JASOS_VERSION_STR    "0.8.0-aegis"
+#define JASOS_VERSION_STR    "0.9.0-aegis"
 
 
 #define PAGE_SHIFT           12u
@@ -70,6 +70,7 @@
 #define MAX_THREADS          256u
 #define MAX_VADS             64u
 #define LOCK_DEPTH_MAX       8u
+#define IST_STACK_BASE       (KERNEL_STACK_BASE + (u64)MAX_THREADS * KSTACK_STRIDE)
 
 #define SERIAL_COM1          0x3F8u
 #define SERIAL_BAUD          115200u

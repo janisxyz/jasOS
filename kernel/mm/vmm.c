@@ -121,6 +121,15 @@ void vmm_unmap_kstack(u32 tid)
     (void)tid;
 }
 
+status_t vmm_map_guarded_stack(virt_t base, u64 size, u8 **out)
+{
+    (void)base;
+    (void)size;
+    if (!out) return STATUS_INVALID_PARAMETER;
+    *out = NULL;
+    return STATUS_NOT_SUPPORTED;
+}
+
 #else /* hardware */
 
 static phys_t g_kernel_cr3;
@@ -269,8 +278,8 @@ void vmm_init(phys_t kphys, u64 ksize)
             (unsigned long long)rx_lo,
             (unsigned long long)rx_hi);
 
-    /* Recursive slot. */
-    pml4[RECURSIVE_SLOT] = cr3 | PTE_P | PTE_W;
+    /* Recursive slot: writable (PTE updates) but NX (do not execute tables). */
+    pml4[RECURSIVE_SLOT] = cr3 | PTE_P | PTE_W | PTE_NX;
 
     __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
     pmm_enter_hhdm();
@@ -283,6 +292,8 @@ void vmm_init(phys_t kphys, u64 ksize)
        until vmm_map_kstack. */
     if (!walk_alloc(cr3, KERNEL_STACK_BASE, true))
         panic("vmm: kstack slot");
+    if (!walk_alloc(cr3, IST_STACK_BASE, true))
+        panic("vmm: ist slot");
 
     kprintf("vmm: cr3=%llx hhdm 4GiB kernel %llx+%llx kstack %llx\n",
             (unsigned long long)cr3,
@@ -291,11 +302,11 @@ void vmm_init(phys_t kphys, u64 ksize)
             (unsigned long long)KERNEL_STACK_BASE);
 }
 
-status_t vmm_map_kstack(u32 tid, u8 **out)
+status_t vmm_map_guarded_stack(virt_t base, u64 size, u8 **out)
 {
-    if (!out || tid == 0 || tid > MAX_THREADS) return STATUS_INVALID_PARAMETER;
-    virt_t base = KERNEL_STACK_BASE + (u64)(tid - 1) * KSTACK_STRIDE;
-    u64 np = KSTACK_SIZE / PAGE_SIZE;
+    if (!out || !base || size == 0 || (size & PAGE_MASK))
+        return STATUS_INVALID_PARAMETER;
+    u64 np = size / PAGE_SIZE;
     for (u64 i = 0; i < np; i++) {
         phys_t pa = pmm_alloc(0, PMM_KERNEL | PMM_ZERO);
         if (pa == PMM_INVALID) {
@@ -312,6 +323,13 @@ status_t vmm_map_kstack(u32 tid, u8 **out)
     }
     *out = (u8 *)(uintptr_t)(base + PAGE_SIZE);
     return STATUS_SUCCESS;
+}
+
+status_t vmm_map_kstack(u32 tid, u8 **out)
+{
+    if (!out || tid == 0 || tid > MAX_THREADS) return STATUS_INVALID_PARAMETER;
+    virt_t base = KERNEL_STACK_BASE + (u64)(tid - 1) * KSTACK_STRIDE;
+    return vmm_map_guarded_stack(base, KSTACK_SIZE, out);
 }
 
 void vmm_unmap_kstack(u32 tid)

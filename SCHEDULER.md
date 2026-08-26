@@ -130,3 +130,7 @@ canary. Lazy FPU: `fpu_lazy_switch` sets `CR0.TS`; `#NM` FXSAVE/FXRSTOR;
 kernel `#NM` panics. Thread exit calls `fpu_drop` then unmaps the
 kstack. WAIT_ALL is covered by host selftest (notification events).
 
+T9: `tss_map_ist` after `vmm_init` points IST1–4 at guarded stacks at
+`IST_STACK_BASE`. DF/NMI/MC/IRQ no longer land in `.bss`.
+
+

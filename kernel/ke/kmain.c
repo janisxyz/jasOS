@@ -107,6 +107,7 @@ void kmain_early(u64 mb2_phys)
     pmm_init(map, nmap, kphys, ksize);
 #ifndef JASOS_HOST
     vmm_init(kphys, ksize);
+    tss_map_ist();
 #else
     vmm_init(0, 0);
 #endif

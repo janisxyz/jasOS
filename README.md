@@ -32,6 +32,8 @@ Clone it. `make`. `make run`. That is how you boot it.
 - 0.7: W^X kernel image, chunked syscall copy, pipe dup writer counts
 - 0.8: `EFER.NXE`, HHDM NX + RO kernel RX, not-present kstack guard,
   lazy FXSAVE, ELF refuses W^X / executable GNU_STACK
+- 0.9: IST stacks relocated to guarded `IST_STACK_BASE`; recursive PML4 NX
+
 
 
 

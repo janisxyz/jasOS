@@ -1,6 +1,8 @@
 #include <jasos/ke.h>
 #include <jasos/kprintf.h>
 #include <jasos/string.h>
+#include <jasos/mm.h>
+#include <jasos/status.h>
 
 typedef struct PACKED {
     u16 limit_low;
@@ -93,3 +95,29 @@ void tss_set_rsp0(u64 rsp)
 {
     tss.rsp0 = rsp;
 }
+
+#ifndef JASOS_HOST
+/*
+ * Relocate IST stacks off .bss onto KERNEL_STACK_BASE's neighbour
+ * (IST_STACK_BASE). Called after vmm_init, before sti. The .bss
+ * arrays stay as a boot-time landing pad; once TSS.IST* point at
+ * the guarded stacks, an overflow is a not-present #PF / DF, not
+ * a smash of kernel data.
+ */
+void tss_map_ist(void)
+{
+    static const u64 sizes[4] = { 2 * PAGE_SIZE, 2 * PAGE_SIZE, 2 * PAGE_SIZE, KSTACK_SIZE };
+    for (u32 i = 0; i < 4; i++) {
+        u8 *p = NULL;
+        virt_t base = IST_STACK_BASE + (u64)i * KSTACK_STRIDE;
+        status_t st = vmm_map_guarded_stack(base, sizes[i], &p);
+        if (!NT_SUCCESS(st) || !p)
+            panic("tss: ist%u map %s", i + 1, status_name(st));
+        tss.ist[i] = (u64)(p + sizes[i]);
+    }
+    kprintf("tss: IST relocated to %llx (guarded)\n",
+            (unsigned long long)IST_STACK_BASE);
+}
+#else
+void tss_map_ist(void) {}
+#endif

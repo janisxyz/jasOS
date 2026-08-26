@@ -34,6 +34,8 @@ closed vs residual.
 | Kernel stack overflow into heap | hardware kstack at `KERNEL_STACK_BASE`, guard page not-present |
 | SSE clobber | lazy FXSAVE on `#NM`; kernel `#NM` panics; `CR0.TS` on switch |
 | `kalloc` unaligned | slab/large payload 16-byte aligned (selftest) |
+| IST stacks in `.bss` | `tss_map_ist` maps guarded stacks at `IST_STACK_BASE` before `sti` |
+| Recursive PML4 executable | slot 510 is `PTE_P|PTE_W|PTE_NX` |
 
 ## Residual (honest)
 
@@ -43,10 +45,10 @@ closed vs residual.
 | No KASLR | kernel at `0xFFFFFFFF80000000` | Fine until a UEFI stub with entropy |
 | No XSAVE | FXSAVE is 512 bytes; AVX is not covered | Do not set `CR4.OSXSAVE` |
 | VAD array 64 | a mapping bomb fails closed with `INSUFFICIENT_RESOURCES` | fail closed is the mitigation |
-| Recursive PML4 | if a user map ever got slot 510, they own page tables | user `NtMap` rejects high VA; user half of CR3 is private |
+| Recursive PML4 | if a user map ever got slot 510, they own page tables | user `NtMap` rejects high VA; user half of CR3 is private; slot is NX |
 | Host `copyin` is memcpy | host HAL is not a security boundary | hardware path probes PTEs and copies via HHDM |
 | Admin == kernel | Token is a field, not an object | do not claim otherwise |
-| IST stacks in `.bss` | TSS IST1–4 are still kernel image, not `KERNEL_STACK_BASE` | IST1 still catches DF; moving them is the next stack pass |
+| Dead `.bss` IST arrays | `ist1`–`ist4` still occupy kernel RW after relocate | waste, not a hole; reclaim is a linker pass |
 | HHDM maps RAM RW | heap and copyin live there | kernel `.text` is RO in HHDM; user never has HHDM |
 
 

@@ -50,6 +50,11 @@ HHDM) so the boot stack survives the switch; user CR3 still has no
 PML4[0]. VGA after `vmm_init` is HHDM-only (`serial_use_hhdm`).
 `fpu_init` runs after `idt_init` and before `sti`.
 
+T9: `tss_map_ist()` runs immediately after `vmm_init()`, before
+`heap_init`. IST pointers in the TSS move from `.bss` to guarded
+stacks. `sti` is still last.
+
+
 
 ## `kmain_early` order (do not reorder)
 

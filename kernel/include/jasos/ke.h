@@ -153,6 +153,7 @@ void      gdt_init(void);
 void      idt_init(void);
 void      tss_init(void);
 void      tss_set_rsp0(u64 rsp);
+void      tss_map_ist(void);
 void      pic_remap(u8 off1, u8 off2);
 void      pic_unmask(u8 irq);
 void      pic_eoi(u8 irq);
