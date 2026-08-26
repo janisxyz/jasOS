@@ -17,11 +17,6 @@ static void emit(char c)
     console_emit(c);
 }
 
-static void emit_n(const char *s, usize n)
-{
-    while (n--) emit(*s++);
-}
-
 static void emit_str(const char *s)
 {
     if (!s) s = "(null)";
