@@ -236,4 +236,8 @@ Syscall 6 is unchanged. envc>`USER_ENVC_MAX` or envc>0 with envp=0 is
 `INVALID_PARAMETER`. Each env string is `copyinstr`'d into `USER_ENV_LEN`.
 crt0: rdi=argc rsi=argv rdx=envp.
 
+T24: no new syscall. `NtProtectVirtualMemory` a1/a2 may span a
+hole-free run of VADs. `old_prot` is the first page. A hole is
+still `CONFLICTING_ADDRESSES`. W^X is still `INVALID_PAGE_PROTECTION`.
+
 

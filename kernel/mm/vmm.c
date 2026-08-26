@@ -56,6 +56,28 @@ static int vad_contains_range(aspace_t *as, virt_t base, virt_t end)
     return -1;
 }
 
+/* T24: [base,end) covered by a hole-free run of VADs, mixed prot
+ * allowed. Returns the VAD index that contains `base`, or -1.
+ * A hole anywhere in the range is -1. */
+static int vad_run_covers(aspace_t *as, virt_t base, virt_t end, u32 *n_out)
+{
+    if (!as || end <= base) return -1;
+    int first = vad_lookup(as, PAGE_ALIGN_DOWN(base));
+    if (first < 0) return -1;
+    u32 n = 0;
+    virt_t cur = base;
+    while (cur < end) {
+        int idx = vad_lookup(as, cur);
+        if (idx < 0) return -1;
+        if (as->vads[idx].end <= cur) return -1;
+        n++;
+        cur = as->vads[idx].end;
+        if (n > MAX_VADS) return -1;
+    }
+    if (n_out) *n_out = n;
+    return first;
+}
+
 static u32 vad_append(aspace_t *as, virt_t start, virt_t end, u32 prot, u32 type, u32 committed)
 {
     u32 i = as->vad_count++;
@@ -1369,8 +1391,46 @@ status_t vmm_protect_user(process_t *p, virt_t base, u64 size, u32 prot, u32 *ol
     spin_lock(&as->lock);
     int idx = vad_contains_range(as, base, end);
     if (idx < 0) {
+        /* T24: hole-free mixed-prot run. Snapshot clips, drop VMM,
+         * then protect each clip (each is contained in one VAD).
+         * Recursion bottoms out on the contained path. A hole is
+         * still CONFLICTING. Partial apply if a later clip fails. */
+        virt_t clo[MAX_VADS], chi[MAX_VADS];
+        u32 nclip = 0;
+        int first = vad_run_covers(as, base, end, &nclip);
+        if (first < 0 || nclip < 2) {
+            spin_unlock(&as->lock);
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
+        u32 old_run = as->vads[first].prot;
+        nclip = 0;
+        virt_t cur = base;
+        while (cur < end && nclip < MAX_VADS) {
+            int i = vad_lookup(as, cur);
+            if (i < 0) {
+                spin_unlock(&as->lock);
+                return STATUS_CONFLICTING_ADDRESSES;
+            }
+            virt_t hi = as->vads[i].end;
+            if (hi > end) hi = end;
+            if (hi <= cur) {
+                spin_unlock(&as->lock);
+                return STATUS_CONFLICTING_ADDRESSES;
+            }
+            clo[nclip] = cur;
+            chi[nclip] = hi;
+            nclip++;
+            cur = hi;
+        }
         spin_unlock(&as->lock);
-        return STATUS_CONFLICTING_ADDRESSES;
+        if (cur < end) return STATUS_INSUFFICIENT_RESOURCES;
+        if (old_prot) *old_prot = old_run;
+        for (u32 k = 0; k < nclip; k++) {
+            u32 ign = 0;
+            status_t st = vmm_protect_user(p, clo[k], chi[k] - clo[k], prot, &ign);
+            if (!NT_SUCCESS(st)) return st;
+        }
+        return STATUS_SUCCESS;
     }
     virt_t a = as->vads[idx].start;
     virt_t d = as->vads[idx].end;

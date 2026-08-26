@@ -180,4 +180,8 @@ readable, nonempty dir `CANNOT_DELETE`, empty dir unlink, init-style
 PATH/HOME on the user stack, envc=0 still a single env NULL after
 argv NULL, syscall 43 dispatch, SYS_MAX out of range.
 
+0.20 selftest covers mixed-VAD protect: 4-page split then whole-range
+RW (coalesce), whole-range RO, two adjacent VADs of different prot,
+and a punched hole still `CONFLICTING_ADDRESSES`.
+
 

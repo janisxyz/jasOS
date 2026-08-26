@@ -1378,6 +1378,82 @@ int selftest_run(void)
         EXPECT(st == STATUS_INVALID_SYSTEM_SERVICE, "SYS_MAX out of range");
     }
 
+    /* T24: NtProtectVirtualMemory walks a hole-free run of mixed-prot
+       VADs. A hole is still CONFLICTING. old_prot is the first page. */
+    {
+        handle_t ph = 0;
+        st = NtCreateProcess(&ph, PROCESS_ALL_ACCESS, "/bin/hello", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st), "t24 proc");
+        object_t *o = NULL;
+        st = ht_lookup(&psp_system_process()->handles, ph, 0, OBJ_PROCESS, &o);
+        EXPECT(NT_SUCCESS(st) && o, "t24 proc lookup");
+        process_t *pp = (process_t *)o;
+
+        virt_t sp = 0x0000000006500000ULL;
+        st = vmm_alloc_user(pp, &sp, 4u * PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+        EXPECT(NT_SUCCESS(st), "t24 4-page alloc");
+        unsigned char fill[4] = { 0xC0, 0xC1, 0xC2, 0xC3 };
+        for (u32 i = 0; i < 4; i++)
+            EXPECT(NT_SUCCESS(vmm_write_aspace(&pp->aspace, sp + i * PAGE_SIZE, &fill[i], 1)),
+                   i == 0 ? "t24 write 0" : i == 1 ? "t24 write 1" :
+                   i == 2 ? "t24 write 2" : "t24 write 3");
+        u32 oldp = 0;
+        st = NtProtectVirtualMemory(ph, sp + PAGE_SIZE, 2u * PAGE_SIZE, PAGE_READONLY, &oldp);
+        EXPECT(NT_SUCCESS(st) && oldp == PAGE_READWRITE, "t24 split middle RO");
+
+        oldp = 0;
+        st = NtProtectVirtualMemory(ph, sp, 4u * PAGE_SIZE, PAGE_READWRITE, &oldp);
+        EXPECT(NT_SUCCESS(st) && oldp == PAGE_READWRITE, "t24 mixed run to RW");
+        memory_basic_information_t mbi;
+        st = NtQueryVirtualMemory(ph, sp, &mbi, sizeof(mbi));
+        EXPECT(NT_SUCCESS(st) && mbi.prot == PAGE_READWRITE &&
+               mbi.region_size == 4u * PAGE_SIZE, "t24 coalesced 4 RW");
+        EXPECT(vmm_handle_user_fault(&pp->aspace, sp + PAGE_SIZE, true),
+               "t24 mid writable after run protect");
+        unsigned char back = 0;
+        st = vmm_read_aspace(&pp->aspace, &back, sp + PAGE_SIZE, 1);
+        EXPECT(NT_SUCCESS(st) && back == 0xC1, "t24 data survived run protect");
+
+        st = NtProtectVirtualMemory(ph, sp + PAGE_SIZE, 2u * PAGE_SIZE, PAGE_READONLY, &oldp);
+        EXPECT(NT_SUCCESS(st), "t24 re-split");
+        oldp = 0;
+        st = NtProtectVirtualMemory(ph, sp, 4u * PAGE_SIZE, PAGE_READONLY, &oldp);
+        EXPECT(NT_SUCCESS(st) && oldp == PAGE_READWRITE, "t24 mixed run to RO");
+        EXPECT(!vmm_handle_user_fault(&pp->aspace, sp, true), "t24 left RO");
+        EXPECT(!vmm_handle_user_fault(&pp->aspace, sp + 3u * PAGE_SIZE, true),
+               "t24 right RO");
+        st = vmm_read_aspace(&pp->aspace, &back, sp + 2u * PAGE_SIZE, 1);
+        EXPECT(NT_SUCCESS(st) && back == 0xC2, "t24 RO still readable");
+
+        virt_t a = 0x0000000006600000ULL;
+        virt_t b = 0x0000000006601000ULL;
+        st = vmm_alloc_user(pp, &a, PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+        EXPECT(NT_SUCCESS(st), "t24 adj RW");
+        st = vmm_alloc_user(pp, &b, PAGE_SIZE, PAGE_READONLY, MEM_COMMIT);
+        EXPECT(NT_SUCCESS(st), "t24 adj RO");
+        oldp = 0;
+        st = NtProtectVirtualMemory(ph, a, 2u * PAGE_SIZE, PAGE_READWRITE, &oldp);
+        EXPECT(NT_SUCCESS(st) && oldp == PAGE_READWRITE, "t24 two-VAD run");
+        st = NtQueryVirtualMemory(ph, a, &mbi, sizeof(mbi));
+        EXPECT(NT_SUCCESS(st) && mbi.region_size == 2u * PAGE_SIZE &&
+               mbi.prot == PAGE_READWRITE, "t24 two-VAD coalesced");
+
+        st = vmm_free_user(pp, sp + PAGE_SIZE, 2u * PAGE_SIZE);
+        EXPECT(NT_SUCCESS(st), "t24 punch hole");
+        st = NtProtectVirtualMemory(ph, sp, 4u * PAGE_SIZE, PAGE_READWRITE, &oldp);
+        EXPECT(st == STATUS_CONFLICTING_ADDRESSES, "t24 hole still CONFLICTING");
+
+        st = vmm_free_user(pp, sp, 0);
+        EXPECT(NT_SUCCESS(st), "t24 free left");
+        st = vmm_free_user(pp, sp + 3u * PAGE_SIZE, 0);
+        EXPECT(NT_SUCCESS(st), "t24 free right");
+        st = vmm_free_user(pp, a, 0);
+        EXPECT(NT_SUCCESS(st), "t24 free adj");
+
+        ob_dereference(o);
+        NtClose(ph);
+    }
+
     kprintf("selftest: all assertions passed\n");
     return 0;
 }

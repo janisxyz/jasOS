@@ -364,4 +364,14 @@ Residual: envp is still one NULL. integrity still *starts* at 1. init/sh kernel-
 - init and sh pass `PATH=/bin:/usr/bin` and `HOME=/`. Spawn does **not** inherit the parent's envp automatically.
 - Residual: no auxv. No `getenv` in libc. env strings with no `=` are copied as-is. integrity still *starts* at 1. init/sh kernel-linked. mixed-VAD protect fail-closed.
 
+| T24 | mixed-VAD protect fail-closed | a hole-free run of split VADs could not be named in one NtProtect |
+
+---
+
+## T24 surface (0.20.0)
+
+- `vad_run_covers` walks [base,end) across adjacent VADs with no hole. Mixed prot is allowed. A gap is still `CONFLICTING_ADDRESSES`.
+- `vmm_protect_user`: if one VAD contains the range, the T14 split path is unchanged. Else snapshot clip ranges, drop VMM, protect each clip (each clip is contained — recursion bottoms out). `old_prot` is the first page's previous prot. Coalesce after each clip still glues same-prot neighbors.
+- Residual: not transactional — a later clip `NO_MEMORY` leaves earlier clips already updated. `NtFreeVirtualMemory` still requires one containing VAD. No auxv. init/sh kernel-linked.
+
 

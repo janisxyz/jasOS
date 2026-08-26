@@ -238,4 +238,9 @@ T23: env strings are written through `vmm_write_aspace` onto the
 existing user stack VAD. No extra mapping. Cap 16×128 plus argv
 fits in 128 KiB minus the guard page.
 
+T24: `vmm_protect_user` names a hole-free run. Each clip re-enters
+the contained split path (host shadow split, hardware
+`apply_prot_range`). Coalesce still concatenates host shadows.
+`NtFreeVirtualMemory` of a mixed run is still `CONFLICTING`.
+
 

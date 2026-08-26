@@ -76,7 +76,7 @@ closed vs residual.
 | HHDM maps RAM RW | heap and copyin live there | kernel `.text` is RO in HHDM; user never has HHDM |
 | virtio-blk virtqueues | identify-only; I/O is Ramdisk0 | do not print "virtio I/O up" |
 | PIC not LAPIC | 8259 is v1; MADT/x2APIC is the next HAL | dmesg says 8259, never LAPIC |
-| Protect spans mixed VADs | one containing VAD only; coalesce is same-prot adjacent | fail closed `CONFLICTING_ADDRESSES` |
+| Protect spans mixed VADs | T24: hole-free run is protected clip-by-clip; a hole is still `CONFLICTING_ADDRESSES` |
 | OOM unmap batch leak | >16-page free with kalloc fail batches 16; populate can refill a cleared page | fail closed is rare; commit cap keeps n_pages bounded |
 | NtCreateProcess has no envp | T23: syscall 43 `process_create_info`; syscall 6 still argv-only |
 | No privileges bitmap | Token has pid+integrity only | `TOKEN_ADJUST` cannot grant Se*; there is no Se* |
@@ -109,5 +109,10 @@ an unlinked dir. envp still one NULL. init/sh still kernel-linked.
 
 T23 residual: no auxv, no getenv, spawn does not inherit parent envp
 unless the caller builds the block. Syscall 6 still cannot pass envp.
+
+| mixed-VAD protect | T24: run walk + per-clip contained protect |
+
+T24 residual: protect of a run is not atomic. Free of a mixed run
+is still one-VAD. A hole is still `CONFLICTING_ADDRESSES`.
 
 

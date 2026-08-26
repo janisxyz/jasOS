@@ -53,6 +53,8 @@ Clone it. `make`. `make run`. That is how you boot it.
   not a UAF; init spawns sh as a child (pid 1 does not die with sh)
 - 0.19: envp on the user stack; syscall 43 `NtCreateProcess2` takes a
   create-info block (syscall 6 still has no 7th argument)
+- 0.20: `NtProtectVirtualMemory` walks a hole-free run of mixed-prot
+  VADs; a hole is still `CONFLICTING_ADDRESSES`
 
 
 
