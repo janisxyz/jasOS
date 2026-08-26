@@ -43,6 +43,14 @@ The 2 GiB identity map is a *boot crutch*. `vmm_init` replaces it with
 the HHDM + kernel image mappings and unmaps the low identity map except
 for the AP trampoline hole we do not yet have.
 
+T8: `entry.S` sets `EFER.LME|EFER.NXE` together. Without NXE, T7's
+`PTE_NX` is a reserved bit and the CR3 load #PFs. `vmm_init` keeps a
+kernel-CR3-only 2 MiB identity (4 KiB leaves, same RO/RW split as
+HHDM) so the boot stack survives the switch; user CR3 still has no
+PML4[0]. VGA after `vmm_init` is HHDM-only (`serial_use_hhdm`).
+`fpu_init` runs after `idt_init` and before `sti`.
+
+
 ## `kmain_early` order (do not reorder)
 
 1. `serial_init()` — COM1 115200 8N1. If this fails we write VGA text

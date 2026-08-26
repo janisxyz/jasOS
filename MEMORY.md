@@ -143,3 +143,16 @@ HHDM still maps the kernel's physical pages writable. A kernel bug
 that writes through HHDM can still clobber .text. Closing that is
 excluding the kernel image from the HHDM or mapping it NX there.
 
+T8: `EFER.NXE` is set in `entry.S` (and again in `vmm_init`) before any
+`PTE_NX` is walked — T7's NX bits were ignored without it. HHDM 2 MiB
+leaves are NX; the 2 MiB covering kernel RX is split to 4 KiB with
+`PTE_W` stripped on `[kphys, _rx_end)`. VGA `0xB8000` and the boot
+stack stay RW. Kernel CR3 keeps a 2 MiB identity of the same 4 KiB
+PT (user CR3 does not copy PML4[0]). Kernel stacks live at
+`KERNEL_STACK_BASE + (tid-1)*32KiB` with page 0 not-present; host
+still uses the `0xA5` canary because it has no PTEs. Heap returns
+16-byte-aligned objects (FXSAVE / GCC `movaps`). Residual: HHDM still
+maps kernel `.data` and the rest of RAM writable — that is the
+direct map, not a hole. IST stacks remain in `.bss`.
+
+

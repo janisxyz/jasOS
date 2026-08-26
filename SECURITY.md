@@ -28,6 +28,12 @@ closed vs residual.
 | Process exit leak | last thread `vmm_aspace_destroy` (walk user half, free frames+tables) + `ht_destroy` |
 | Pipe dup EOF | `open_fn` increments readers/writers on insert and duplicate |
 | Syscall bounce DoS | user Read/Write chunked at `SYSCALL_COPY_MAX`; hard cap `COPY_MAX` |
+| HHDM RWX over `.text` | HHDM is NX; kernel RX phys pages are RO in HHDM (`fill_lo_pt`) |
+| `PTE_NX` ignored | `EFER.NXE` in `entry.S` before long-mode CR3 |
+| W^X ELF | `elf_load` policy pass refuses `PF_W|PF_X` PT_LOAD and `PF_X` PT_GNU_STACK |
+| Kernel stack overflow into heap | hardware kstack at `KERNEL_STACK_BASE`, guard page not-present |
+| SSE clobber | lazy FXSAVE on `#NM`; kernel `#NM` panics; `CR0.TS` on switch |
+| `kalloc` unaligned | slab/large payload 16-byte aligned (selftest) |
 
 ## Residual (honest)
 
@@ -35,12 +41,13 @@ closed vs residual.
 |---|---|---|
 | Kernel-linked userland | init/sh/ls/cat/echo/ps/crash are still linked into kernel.elf so the box has a shell the day it boots | Treat sh as ring 0. `/bin/hello` is the ring-3 path. |
 | No KASLR | kernel at `0xFFFFFFFF80000000` | Fine until a UEFI stub with entropy |
-| FXSAVE missing | SSE from user clobbers kernel XMM | Kernel built `-mno-sse`; do not enable XMM in user until FXSAVE |
+| No XSAVE | FXSAVE is 512 bytes; AVX is not covered | Do not set `CR4.OSXSAVE` |
 | VAD array 64 | a mapping bomb fails closed with `INSUFFICIENT_RESOURCES` | fail closed is the mitigation |
 | Recursive PML4 | if a user map ever got slot 510, they own page tables | user `NtMap` rejects high VA; user half of CR3 is private |
 | Host `copyin` is memcpy | host HAL is not a security boundary | hardware path probes PTEs and copies via HHDM |
 | Admin == kernel | Token is a field, not an object | do not claim otherwise |
-| Kernel stack guard | canary page of `0xA5`, not a not-present PTE | IST1 still catches DF; canary panics on exit |
+| IST stacks in `.bss` | TSS IST1–4 are still kernel image, not `KERNEL_STACK_BASE` | IST1 still catches DF; moving them is the next stack pass |
+| HHDM maps RAM RW | heap and copyin live there | kernel `.text` is RO in HHDM; user never has HHDM |
 
 
 ## Panic path contract

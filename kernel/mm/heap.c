@@ -78,7 +78,10 @@ static slab_t *slab_new(u32 size)
     s->pages = pages;
     s->phys = pa;
     s->large = false;
-    u32 header = (u32)sizeof(slab_t) + 64;
+    /* Objects are 16-byte aligned. FXSAVE and GCC's movaps on
+       ALIGNED(16) fields (thread_t.fpu_state) require it. Size
+       classes are already multiples of 16 so the stride preserves it. */
+    u32 header = (u32)((sizeof(slab_t) + 64u + 15u) & ~15u);
     s->base = base + header;
     s->objects = (u32)((pages * PAGE_SIZE - header) / size);
     if (s->objects == 0) {
@@ -141,7 +144,8 @@ void *kalloc(usize n)
     if (c >= 0) {
         p = slab_alloc(&g_classes[c], k_sizes[c]);
     } else {
-        u32 pages = (u32)((PAGE_ALIGN_UP(n + sizeof(slab_t))) / PAGE_SIZE);
+        u32 hdr = (u32)((sizeof(slab_t) + 15u) & ~15u);
+        u32 pages = (u32)((PAGE_ALIGN_UP(n + hdr)) / PAGE_SIZE);
         u32 order = 0;
         while ((1u << order) < pages) order++;
         spin_unlock(&g_heap_lock);
@@ -164,7 +168,7 @@ void *kalloc(usize n)
         s->large = true;
         s->objects = 1;
         s->free_count = 0;
-        s->base = base + sizeof(slab_t);
+        s->base = base + ((sizeof(slab_t) + 15u) & ~15u);
         s->bitmap = NULL;
         s->next = g_large;
         g_large = s;

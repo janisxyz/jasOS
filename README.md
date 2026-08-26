@@ -29,6 +29,10 @@ Clone it. `make`. `make run`. That is how you boot it.
 - Host target that runs the same kernel C without QEMU (`make host`)
 - 0.6: IST IRQ frames, handle generation, SMEP/SMAP, syscall marshalling,
   WaitForMultiple, pipe EOF, `/dev/console`
+- 0.7: W^X kernel image, chunked syscall copy, pipe dup writer counts
+- 0.8: `EFER.NXE`, HHDM NX + RO kernel RX, not-present kstack guard,
+  lazy FXSAVE, ELF refuses W^X / executable GNU_STACK
+
 
 
 ## Contracts (read these first)

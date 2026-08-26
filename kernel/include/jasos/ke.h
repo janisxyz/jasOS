@@ -73,6 +73,8 @@ typedef struct thread {
     status_t          last_status;
     virt_t            user_rip;
     virt_t            user_rsp;
+    u8                fpu_state[512] ALIGNED(16);
+    bool              fpu_used;
 } thread_t;
 
 typedef struct process {
@@ -164,6 +166,11 @@ status_t  syscall_from_entry(u64 *frame);
 void      isr_dispatch(trap_frame_t *tf);
 void      cpu_enable_smap_smep(void);
 void      user_thread_entry(void *arg);
+
+void      fpu_init(void);
+void      fpu_nm(void);
+void      fpu_lazy_switch(void);
+void      fpu_drop(thread_t *t);
 
 void      timer_init(void);
 void      timer_tick(u64 now);

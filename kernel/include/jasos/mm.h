@@ -82,6 +82,8 @@ status_t vmm_read_aspace(aspace_t *as, void *dst, virt_t va, u64 n);
 status_t copyin(void *kdst, virt_t usrc, u64 n);
 status_t copyout(virt_t udst, const void *ksrc, u64 n);
 status_t copyinstr(char *kdst, virt_t usrc, u64 cap);
+status_t vmm_map_kstack(u32 tid, u8 **out);
+void     vmm_unmap_kstack(u32 tid);
 
 void  *kalloc(usize n);
 void  *kalloc_zero(usize n);

@@ -14,6 +14,9 @@
  *  - No ASLR. Image is at the ELF vaddr.
  *  - No relocations. ET_DYN is STATUS_NOT_SUPPORTED.
  *  - Interpreter (PT_INTERP) is refused — static only.
+ *  - W^X PT_LOAD and PF_X PT_GNU_STACK are refused. Missing
+ *    GNU_STACK defaults to NX (we do not replay Linux's exec-stack
+ *    heritage).
  */
 
 #define EI_NIDENT 16
@@ -24,8 +27,9 @@
 #define ET_DYN 3
 #define EM_X86_64 62
 #define PT_LOAD 1
-#define PT_INTERP 3
 #define PT_DYNAMIC 2
+#define PT_INTERP 3
+#define PT_GNU_STACK 0x6474E551u
 #define PF_X 1
 #define PF_W 2
 #define PF_R 4
@@ -63,20 +67,29 @@ status_t elf_load(process_t *p, const u8 *image, u64 len, virt_t *entry_out)
     if (eh->e_entry > USER_CANONICAL_TOP) return STATUS_INVALID_IMAGE_FORMAT;
 
     const elf64_phdr *ph = (const elf64_phdr *)(image + eh->e_phoff);
+    /* Policy pass. Do not leave a partial map because phdr N+1 is illegal. */
     for (u16 i = 0; i < eh->e_phnum; i++) {
         if (ph[i].p_type == PT_INTERP || ph[i].p_type == PT_DYNAMIC)
             return STATUS_NOT_SUPPORTED;
+        if (ph[i].p_type == PT_GNU_STACK) {
+            if (ph[i].p_flags & PF_X)
+                return STATUS_INVALID_IMAGE_FORMAT;
+            continue;
+        }
         if (ph[i].p_type != PT_LOAD) continue;
+        if ((ph[i].p_flags & (PF_W | PF_X)) == (PF_W | PF_X))
+            return STATUS_INVALID_IMAGE_FORMAT;
         if (ph[i].p_vaddr > USER_CANONICAL_TOP) return STATUS_ACCESS_VIOLATION;
         if (ph[i].p_memsz < ph[i].p_filesz) return STATUS_INVALID_IMAGE_FORMAT;
         if (ph[i].p_offset + ph[i].p_filesz > len) return STATUS_INVALID_IMAGE_FORMAT;
+    }
+    for (u16 i = 0; i < eh->e_phnum; i++) {
+        if (ph[i].p_type != PT_LOAD) continue;
         virt_t va = PAGE_ALIGN_DOWN(ph[i].p_vaddr);
         u64 size = PAGE_ALIGN_UP(ph[i].p_vaddr + ph[i].p_memsz) - va;
         u32 prot = PAGE_READONLY;
         if (ph[i].p_flags & PF_W) prot = PAGE_READWRITE;
-        if (ph[i].p_flags & PF_X) {
-            prot = (ph[i].p_flags & PF_W) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
-        }
+        if (ph[i].p_flags & PF_X) prot = PAGE_EXECUTE_READ;
         virt_t base = va;
         status_t st = vmm_alloc_user(p, &base, size, prot, MEM_COMMIT);
         if (!NT_SUCCESS(st)) return st;

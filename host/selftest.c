@@ -46,6 +46,7 @@ int selftest_run(void)
 
     void *a = kalloc(64);
     EXPECT(a != NULL, "kalloc 64");
+    EXPECT(((uintptr_t)a & 15u) == 0, "kalloc 16-align");
     memset(a, 0x5A, 64);
     kfree(a);
     void *b = kalloc(64);
@@ -271,7 +272,59 @@ int selftest_run(void)
         NtClose(e2);
     }
 
+    {
+        handle_t a = 0, b = 0;
+        st = NtCreateEvent(&a, NULL, false, false);
+        EXPECT(NT_SUCCESS(st), "wfmo-all a");
+        st = NtCreateEvent(&b, NULL, false, false);
+        EXPECT(NT_SUCCESS(st), "wfmo-all b");
+        handle_t pair[2] = { a, b };
+        st = NtWaitForMultipleObjects(pair, 2, true, 0);
+        EXPECT(st == STATUS_TIMEOUT, "wfmo-all timeout");
+        NtSetEvent(a);
+        st = NtWaitForMultipleObjects(pair, 2, true, 0);
+        EXPECT(st == STATUS_TIMEOUT, "wfmo-all still missing b");
+        NtSetEvent(b);
+        st = NtWaitForMultipleObjects(pair, 2, true, 0);
+        EXPECT(NT_SUCCESS(st), "wfmo-all both signaled");
+        NtClose(a);
+        NtClose(b);
+    }
+
+    /* WFMO bounds: 0 and 17 fail closed. */
+    {
+        handle_t dummy = 0;
+        st = NtWaitForMultipleObjects(&dummy, 0, false, 0);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "wfmo count 0");
+        handle_t too[17];
+        for (int i = 0; i < 17; i++) too[i] = 0;
+        st = NtWaitForMultipleObjects(too, 17, false, 0);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "wfmo count 17");
+    }
+
+    /* W^X PT_LOAD and executable PT_GNU_STACK are refused. */
+    {
+        u8 wx[128];
+        u64 wlen = elf_make_minimal_hello(wx, sizeof(wx));
+        EXPECT(wlen == 0x80, "wx hello size");
+        wx[68] = 7; /* PT_LOAD PF_R|PF_W|PF_X */
+        virt_t ent = 0;
+        st = elf_load(psp_system_process(), wx, wlen, &ent);
+        EXPECT(st == STATUS_INVALID_IMAGE_FORMAT, "elf W^X PT_LOAD refused");
+
+        u8 gs[192];
+        memset(gs, 0, sizeof(gs));
+        memcpy(gs, mini, 0x80);
+        gs[56] = 2; /* e_phnum = 2 */
+        /* second phdr at 64+56=120: PT_GNU_STACK, PF_X */
+        gs[120] = 0x51; gs[121] = 0xE5; gs[122] = 0x74; gs[123] = 0x64;
+        gs[124] = 1; /* PF_X */
+        st = elf_load(psp_system_process(), gs, 192, &ent);
+        EXPECT(st == STATUS_INVALID_IMAGE_FORMAT, "elf PT_GNU_STACK+X refused");
+    }
+
     /* Pipe last-writer close yields EOF. */
+
     {
         handle_t pr = 0, pw = 0;
         st = NtCreatePipe(&pr, &pw);

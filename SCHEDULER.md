@@ -122,3 +122,11 @@ T6: `NtWaitForMultipleObjects` enqueues a wait_block on every object,
 wakes on any (WAIT_ANY) or retries until all signaled (WAIT_ALL).
 Timeout scan in `ke_on_tick` unlinks every wait_block, not just `t->wait`.
 Kstack canary checked on exit.
+
+T8: hardware kstack is `KERNEL_STACK_BASE + (tid-1)*KSTACK_STRIDE`,
+page 0 not-present, 16 KiB RW+NX, then a hole. Overflow is a kernel
+#PF (panic), not a heap smash. Host still uses posix_memalign + `0xA5`
+canary. Lazy FPU: `fpu_lazy_switch` sets `CR0.TS`; `#NM` FXSAVE/FXRSTOR;
+kernel `#NM` panics. Thread exit calls `fpu_drop` then unmaps the
+kstack. WAIT_ALL is covered by host selftest (notification events).
+

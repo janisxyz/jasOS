@@ -34,6 +34,7 @@ KERNEL_C = \
 	kernel/ke/timer.c \
 	kernel/ke/syscall.c \
 	kernel/ke/exec.c \
+	kernel/ke/fpu.c \
 	kernel/ke/kmain.c \
 	kernel/mm/pmm.c \
 	kernel/mm/vmm.c \
@@ -72,6 +73,7 @@ HOST_C = \
 	kernel/ke/timer.c \
 	kernel/ke/syscall.c \
 	kernel/ke/exec.c \
+	kernel/ke/fpu.c \
 	kernel/ke/kmain.c \
 	kernel/mm/pmm.c \
 	kernel/mm/vmm.c \

@@ -181,6 +181,7 @@ void sched_reschedule(void)
     cpu->current_process = next->process;
     spin_unlock(&g_sched_lock);
 #ifndef JASOS_HOST
+    fpu_lazy_switch();
     if (next->kstack) {
         cpu->kernel_rsp = (u64)(next->kstack + next->kstack_size);
         tss_set_rsp0(cpu->kernel_rsp);
@@ -221,6 +222,7 @@ void sched_exit_thread(status_t st)
         t->wait.object = NULL;
         spin_unlock(&d->lock);
     }
+#ifdef JASOS_HOST
     if (t->kstack) {
         u8 *g = t->kstack - PAGE_SIZE;
         for (u32 i = 0; i < 16; i++) {
@@ -228,6 +230,13 @@ void sched_exit_thread(status_t st)
                 panic("kstack smash thread %s", t->name);
         }
     }
+#else
+    fpu_drop(t);
+    if (t->kstack) {
+        vmm_unmap_kstack((u32)t->tid);
+        t->kstack = NULL;
+    }
+#endif
     t->exit_status = st;
     t->state = THR_TERMINATED;
     disp_signal(&t->disp, 1);
@@ -398,11 +407,9 @@ status_t psp_create_thread(process_t *p, const char *name, void (*entry)(void *)
     }
 #else
     {
-        u8 *raw = kalloc_zero(KSTACK_SIZE + PAGE_SIZE);
-        if (raw) {
-            memset(raw, 0xA5, PAGE_SIZE);
-            t->kstack = raw + PAGE_SIZE;
-        }
+        status_t ks = vmm_map_kstack((u32)t->tid, &t->kstack);
+        if (!NT_SUCCESS(ks)) t->kstack = NULL;
+        t->fpu_used = false;
     }
 #endif
     if (!t->kstack) {

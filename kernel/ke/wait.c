@@ -6,14 +6,14 @@
  * Wait/signal. Sleeps. Not a spinlock in a trench coat.
  *
  * Why this will fail in production:
- *  - Multi-object wait (WaitForMultipleObjects) is not implemented.
- *  - A thread killed while on a wait list is not purged in v1; we
- *    require exit to run sched_exit_thread which does not walk every
- *    object. Residual: dying-while-waiting is a leak of the wait block
- *    (the thread object stays referenced by the list until signal).
+ *  - WAIT_ALL consumes objects in a second pass with timeout 0; a
+ *    concurrent waiter can steal a sync event between the wake and
+ *    the consume. NT has the same class of race without a rundown.
+ *  - 16-object cap. A 17th handle fails closed.
  * Fixed here: mutex ownership transfers in disp_wake_one; abandoned
  * mutex wakes with STATUS_ABANDONED; wait never holds DISP across
- * a SCHED acquire without the T3 ranking (DISP=9 < SCHED=10).
+ * a SCHED acquire without the T3 ranking (DISP=9 < SCHED=10);
+ * WaitForMultiple enqueues a wait_block on every object.
  */
 
 status_t ke_wait_object(dispatcher_t *d, u64 timeout_ticks)

@@ -78,12 +78,19 @@ is enough and does not add a third-party boot protocol to the TCB.
 
 0xFFFF_8000_0000_0000   direct map of physical memory (HHDM)
 0xFFFF_9000_0000_0000   kernel heap (slabs sit here)
+0xFFFF_A000_0000_0000   kernel stacks (32 KiB stride, guard page)
 0xFFFF_FF00_0000_0000   recursive PML4 window (slot 510)
 0xFFFF_FFFF_8000_0000   kernel image (mcmodel=kernel, -2GB)
 ```
 
 PML4[510] is recursive. Slot 511 is the kernel image. Slot 256 starts
 the HHDM. User owns 0..255.
+
+T8: `KERNEL_STACK_BASE` (PML4 320) is pre-created in `vmm_init` so
+every user CR3 shares the PDPT. Heap slabs actually live in the HHDM
+today (`HHDM_BASE + pa`); `HEAP_BASE` is reserved, not yet the slab
+window. Do not put executable leaves in the HHDM.
+
 
 Invariant: a user page table never contains a mapping with the
 supervisor bit clear *and* a kernel virtual address. `NtMapViewOfSection`

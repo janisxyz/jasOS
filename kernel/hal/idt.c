@@ -86,6 +86,15 @@ void isr_dispatch(trap_frame_t *tf)
         return;
     }
 
+    /* Lazy FPU. Kernel is -mno-sse; a kernel #NM is a bug. */
+    if (vector == 7) {
+        if (!from_user(tf))
+            panic("#NM from kernel rip=%llx — SSE in -mno-sse code",
+                  (unsigned long long)tf->rip);
+        fpu_nm();
+        return;
+    }
+
     u64 cr2 = 0;
     if (vector == 14)
         __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));

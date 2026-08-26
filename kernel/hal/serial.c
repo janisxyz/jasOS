@@ -18,6 +18,12 @@ ALWAYS_INLINE u8 inb(u16 port)
 #define COM SERIAL_COM1
 
 extern int kbd_getchar(void);
+static int g_vga_hhdm;
+
+void serial_use_hhdm(void)
+{
+    g_vga_hhdm = 1;
+}
 
 void serial_init(void)
 {
@@ -81,8 +87,10 @@ void console_emit(char c)
     }
     if (row >= 25 || col >= 80) return;
     u16 cell = (u16)(u8)c | 0x0700;
-    vga_id[row * 80 + col] = cell;
-    vga_hh[row * 80 + col] = cell;
+    /* Identity 0xB8000 dies after a user CR3 load. HHDM is the only
+       legal VGA after vmm_init. */
+    u16 *vga = g_vga_hhdm ? vga_hh : vga_id;
+    vga[row * 80 + col] = cell;
     (void)scrolled;
     col++;
     if (col >= 80) { col = 0; if (row < 24) row++; }
@@ -91,6 +99,7 @@ void console_emit(char c)
 #else /* JASOS_HOST */
 
 void serial_init(void) {}
+void serial_use_hhdm(void) {}
 
 void serial_putchar(char c)
 {

@@ -15,6 +15,7 @@ void serial_init(void);
 void serial_write(const char *s, usize n);
 void serial_putchar(char c);
 int  serial_poll_char(void); /* -1 if empty */
+void serial_use_hhdm(void);
 
 /* Host and kernel both call this; host writes stdout. */
 void console_emit(char c);

@@ -3,9 +3,9 @@
 #include <jasos/types.h>
 
 #define JASOS_VERSION_MAJOR  0
-#define JASOS_VERSION_MINOR  7
+#define JASOS_VERSION_MINOR  8
 #define JASOS_VERSION_PATCH  0
-#define JASOS_VERSION_STR    "0.7.0-aegis"
+#define JASOS_VERSION_STR    "0.8.0-aegis"
 
 
 #define PAGE_SHIFT           12u
@@ -28,6 +28,8 @@
 
 #define KSTACK_SIZE          (16u * 1024u)
 #define KSTACK_GUARD         PAGE_SIZE
+/* 32 KiB VA per thread: 4 KiB not-present guard, 16 KiB stack, 12 KiB hole. */
+#define KSTACK_STRIDE        (32u * 1024u)
 #define BOOT_STACK_SIZE      (16u * 1024u)
 
 #define PMM_MAX_ORDER        18u

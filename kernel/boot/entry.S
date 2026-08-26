@@ -87,10 +87,10 @@ _start:
     orl  $(1 << 5), %eax
     movl %eax, %cr4
 
-    /* EFER.LME */
+    /* EFER.LME | EFER.NXE — NXE must be on before any PTE_NX is walked. */
     movl $0xC0000080, %ecx
     rdmsr
-    orl  $(1 << 8), %eax
+    orl  $((1 << 8) | (1 << 11)), %eax
     wrmsr
 
     /* PG + PE */

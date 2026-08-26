@@ -123,6 +123,7 @@ void kmain_early(u64 mb2_phys)
     syscall_init();
     pci_init();
     kbd_init();
+    fpu_init();
     cpu_enable_smap_smep();
     __asm__ volatile("sti");
 #endif

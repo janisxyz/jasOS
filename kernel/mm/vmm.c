@@ -12,11 +12,12 @@
  * host HAL; the real kernel never memcpy's a user pointer.
  *
  * Why this will fail in production:
- *  - Kernel map is frozen after vmm_init. Loadable drivers cannot add
- *    kernel VA without a shootdown we do not have.
- *  - Demand-zero PF is not wired in v1; NtAllocateVirtualMemory backs
- *    immediately.
- *  - VAD array is 64 entries. A fourth library mapping will fail closed.
+ *  - Kernel map is frozen after vmm_init except kstack leaves under a
+ *    pre-created KERNEL_STACK_BASE PDPT. Loadable drivers still cannot
+ *    add a new kernel PML4 slot without a shootdown we do not have.
+ *  - NtAllocateVirtualMemory backs immediately. Demand-zero PF only
+ *    fills a committed VAD whose PTE was dropped.
+ *  - VAD array is 64 entries. A mapping bomb fails closed.
  */
 
 static aspace_t g_kernel_as;
@@ -107,6 +108,19 @@ status_t copyinstr(char *kdst, virt_t usrc, u64 cap)
     return STATUS_SUCCESS;
 }
 
+status_t vmm_map_kstack(u32 tid, u8 **out)
+{
+    (void)tid;
+    if (!out) return STATUS_INVALID_PARAMETER;
+    *out = NULL;
+    return STATUS_NOT_SUPPORTED;
+}
+
+void vmm_unmap_kstack(u32 tid)
+{
+    (void)tid;
+}
+
 #else /* hardware */
 
 static phys_t g_kernel_cr3;
@@ -154,14 +168,47 @@ static u64 *walk_alloc(phys_t cr3, virt_t va, bool create)
     return &pt[i1];
 }
 
+/*
+ * Fill a 4 KiB PT covering `base`..`base+2MiB`. Kernel RX physical
+ * pages are present + NX + not writable. Everything else is RW+NX.
+ * Identity still live; `pt` is a physical pointer.
+ */
+static void fill_lo_pt(u64 *pt, phys_t base, phys_t rx_lo, phys_t rx_hi)
+{
+    for (u32 i = 0; i < 512; i++) {
+        phys_t pa = base + (phys_t)i * PAGE_SIZE;
+        u64 f = PTE_P | PTE_G | PTE_NX;
+        if (pa < rx_lo || pa >= rx_hi)
+            f |= PTE_W;
+        pt[i] = pa | f;
+    }
+}
+
+static void cpu_enable_nxe(void)
+{
+    u32 a, d;
+    __asm__ volatile("rdmsr" : "=a"(a), "=d"(d) : "c"(0xC0000080u));
+    a |= (1u << 11); /* IA32_EFER.NXE */
+    __asm__ volatile("wrmsr" :: "c"(0xC0000080u), "a"(a), "d"(d));
+}
+
 void vmm_init(phys_t kphys, u64 ksize)
 {
+    cpu_enable_nxe();
+
     phys_t cr3 = pt_alloc();
     if (cr3 == PMM_INVALID) panic("vmm: cr3");
     g_kernel_cr3 = cr3;
     u64 *pml4 = (u64 *)(uintptr_t)cr3; /* identity still up */
 
-    /* HHDM: map first 4 GiB as 2 MiB pages at HHDM_BASE. */
+    extern u8 _rx_end[];
+    phys_t rx_lo = PAGE_ALIGN_DOWN(kphys);
+    phys_t rx_hi = PAGE_ALIGN_UP((phys_t)((uintptr_t)_rx_end - KERNEL_VMA));
+
+    /* HHDM: map first 4 GiB as 2 MiB pages at HHDM_BASE, all NX.
+       The 2 MiB page(s) covering kernel RX are split to 4 KiB and
+       stripped of PTE_W so a kernel bug writing through HHDM cannot
+       clobber .text. VGA (0xB8000) and the boot stack stay RW. */
     phys_t pdpt_p = pt_alloc();
     phys_t pd_p   = pt_alloc();
     if (pdpt_p == PMM_INVALID || pd_p == PMM_INVALID) panic("vmm: hhdm");
@@ -170,7 +217,30 @@ void vmm_init(phys_t kphys, u64 ksize)
     pdpt[0] = pd_p | PTE_P | PTE_W | PTE_G;
     u64 *pd = (u64 *)(uintptr_t)pd_p;
     for (u32 i = 0; i < 512; i++) {
-        pd[i] = ((u64)i << 21) | PTE_P | PTE_W | PTE_PS | PTE_G;
+        pd[i] = ((u64)i << 21) | PTE_P | PTE_W | PTE_PS | PTE_G | PTE_NX;
+    }
+    for (phys_t base = rx_lo & ~0x1FFFFFULL; base < rx_hi; base += 0x200000ULL) {
+        u32 i2 = (u32)((base >> 21) & 0x1FF);
+        phys_t ptp = pt_alloc();
+        if (ptp == PMM_INVALID) panic("vmm: hhdm split");
+        fill_lo_pt((u64 *)(uintptr_t)ptp, base, rx_lo, rx_hi);
+        pd[i2] = ptp | PTE_P | PTE_W | PTE_G;
+    }
+
+    /* Kernel-CR3-only identity of the first 2 MiB so the boot stack
+       and VGA survive the CR3 switch. User CR3 copies skip PML4[0]. */
+    {
+        phys_t id_pdpt = pt_alloc();
+        phys_t id_pd   = pt_alloc();
+        phys_t id_pt   = pt_alloc();
+        if (id_pdpt == PMM_INVALID || id_pd == PMM_INVALID || id_pt == PMM_INVALID)
+            panic("vmm: ident");
+        pml4[0] = id_pdpt | PTE_P | PTE_W | PTE_G;
+        u64 *idp = (u64 *)(uintptr_t)id_pdpt;
+        idp[0] = id_pd | PTE_P | PTE_W | PTE_G;
+        u64 *idd = (u64 *)(uintptr_t)id_pd;
+        idd[0] = id_pt | PTE_P | PTE_W | PTE_G;
+        fill_lo_pt((u64 *)(uintptr_t)id_pt, 0, rx_lo, rx_hi);
     }
 
     /* Kernel image: 2 MiB pages covering kphys..kphys+ksize at KERNEL_VMA. */
@@ -187,7 +257,6 @@ void vmm_init(phys_t kphys, u64 ksize)
     u64 kpages2m = (PAGE_ALIGN_UP(ksize + (kphys & 0x1FFFFF)) + 0x1FFFFF) / 0x200000;
     if (kpages2m < 2) kpages2m = 2;
     phys_t kbase = kphys & ~0x1FFFFFULL;
-    extern u8 _rx_end[];
     for (u64 i = 0; i < kpages2m && i < 512; i++) {
         virt_t page_va = KERNEL_VMA + i * 0x200000ULL;
         u64 flags = PTE_P | PTE_PS | PTE_G;
@@ -195,21 +264,61 @@ void vmm_init(phys_t kphys, u64 ksize)
             flags |= PTE_W | PTE_NX;
         kpd[i] = (kbase + i * 0x200000ULL) | flags;
     }
-    kprintf("vmm: kernel RX .. %llx RW-NX after\n",
-            (unsigned long long)(uintptr_t)_rx_end);
-
+    kprintf("vmm: kernel RX .. %llx RW-NX after; HHDM NX; phys [%llx,%llx) RO\n",
+            (unsigned long long)(uintptr_t)_rx_end,
+            (unsigned long long)rx_lo,
+            (unsigned long long)rx_hi);
 
     /* Recursive slot. */
     pml4[RECURSIVE_SLOT] = cr3 | PTE_P | PTE_W;
 
     __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
     pmm_enter_hhdm();
+    serial_use_hhdm();
     g_kernel_as.cr3_phys = cr3;
     spin_init(&g_kernel_as.lock, "kas", LOCK_RANK_VMM);
-    kprintf("vmm: cr3=%llx hhdm 4GiB kernel %llx+%llx\n",
+
+    /* Pre-create KERNEL_STACK_BASE tables so every user CR3 that
+       copies the kernel half shares the PDPT. Leaves stay not-present
+       until vmm_map_kstack. */
+    if (!walk_alloc(cr3, KERNEL_STACK_BASE, true))
+        panic("vmm: kstack slot");
+
+    kprintf("vmm: cr3=%llx hhdm 4GiB kernel %llx+%llx kstack %llx\n",
             (unsigned long long)cr3,
             (unsigned long long)kphys,
-            (unsigned long long)ksize);
+            (unsigned long long)ksize,
+            (unsigned long long)KERNEL_STACK_BASE);
+}
+
+status_t vmm_map_kstack(u32 tid, u8 **out)
+{
+    if (!out || tid == 0 || tid > MAX_THREADS) return STATUS_INVALID_PARAMETER;
+    virt_t base = KERNEL_STACK_BASE + (u64)(tid - 1) * KSTACK_STRIDE;
+    u64 np = KSTACK_SIZE / PAGE_SIZE;
+    for (u64 i = 0; i < np; i++) {
+        phys_t pa = pmm_alloc(0, PMM_KERNEL | PMM_ZERO);
+        if (pa == PMM_INVALID) {
+            vmm_unmap(&g_kernel_as, base + PAGE_SIZE, i);
+            return STATUS_NO_MEMORY;
+        }
+        status_t st = vmm_map(&g_kernel_as, base + PAGE_SIZE + i * PAGE_SIZE, pa, 1,
+                              PTE_P | PTE_W | PTE_G | PTE_NX);
+        if (!NT_SUCCESS(st)) {
+            pmm_free(pa, 0);
+            vmm_unmap(&g_kernel_as, base + PAGE_SIZE, i);
+            return st;
+        }
+    }
+    *out = (u8 *)(uintptr_t)(base + PAGE_SIZE);
+    return STATUS_SUCCESS;
+}
+
+void vmm_unmap_kstack(u32 tid)
+{
+    if (tid == 0 || tid > MAX_THREADS) return;
+    virt_t base = KERNEL_STACK_BASE + (u64)(tid - 1) * KSTACK_STRIDE;
+    vmm_unmap(&g_kernel_as, base + PAGE_SIZE, KSTACK_SIZE / PAGE_SIZE);
 }
 
 void vmm_aspace_init(aspace_t *as)
