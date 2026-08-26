@@ -84,7 +84,10 @@ Every user pointer is probed:
 4. Length does not wrap.
 
 Failure is `STATUS_ACCESS_VIOLATION`, never a kernel PF. The probe walks
-the *current* address space. Kernel threads have no user map; a syscall
+the *current* address space **VADs** (T11), not live `PTE_P` bits.
+A committed page that has not yet been touched is a valid copyin target;
+`vmm_read_aspace` demand-zeros it. A miss (no VAD, including the user
+stack guard hole) is AV. Kernel threads have no user map; a syscall
 from a kernel thread with a user pointer is a bug and panics.
 
 Max copyin size v1: 1 MiB. Bigger is `STATUS_INVALID_PARAMETER`.

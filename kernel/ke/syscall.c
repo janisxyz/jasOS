@@ -300,6 +300,9 @@ status_t NtCreateThread(handle_t *out, void (*entry)(void *), void *arg, u32 pri
         /* User RIP is never called in kernel. SMEP would #PF it;
            we refuse to even try. Allocate a stack, park the RIP on
            the TCB, trampoline into enter_user. */
+        virt_t rip = (virt_t)(uintptr_t)entry;
+        if (rip > USER_CANONICAL_TOP)
+            return STATUS_ACCESS_VIOLATION;
 #ifdef JASOS_HOST
         (void)arg;
         (void)prio;

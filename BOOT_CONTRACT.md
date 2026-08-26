@@ -54,6 +54,10 @@ T9: `tss_map_ist()` runs immediately after `vmm_init()`, before
 `heap_init`. IST pointers in the TSS move from `.bss` to guarded
 stacks. `sti` is still last.
 
+T10: there is no `.bss` IST landing pad. `tss_init` leaves IST=0.
+`tss_map_ist` is the only installer. `pci_init` identifies virtio-blk
+and does not claim I/O. `io_init` brings up Serial0 and Ramdisk0.
+
 
 
 ## `kmain_early` order (do not reorder)

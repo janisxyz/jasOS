@@ -36,6 +36,12 @@ closed vs residual.
 | `kalloc` unaligned | slab/large payload 16-byte aligned (selftest) |
 | IST stacks in `.bss` | `tss_map_ist` maps guarded stacks at `IST_STACK_BASE` before `sti` |
 | Recursive PML4 executable | slot 510 is `PTE_P|PTE_W|PTE_NX` |
+| IST `.bss` landing pad | arrays deleted; IST=0 until `tss_map_ist` |
+| User `NtCreateThread` kernel RIP on host | rejected with `ACCESS_VIOLATION` before the HOST ifdef |
+| Ramdisk dmesg lie | real 1 MiB backing, IRP dispatch, `/dev/ram0` |
+| `NtAllocate` pre-backed every page | demand-zero + `PTE_SW_COMMIT`; PF/copyin populate |
+| copyin required `PTE_P` | hardware probe is VAD+prot; populate on copy |
+| Mapping bomb hits PMM | `USER_COMMIT_MAX` 32 MiB + overlap reject |
 
 ## Residual (honest)
 
@@ -44,12 +50,13 @@ closed vs residual.
 | Kernel-linked userland | init/sh/ls/cat/echo/ps/crash are still linked into kernel.elf so the box has a shell the day it boots | Treat sh as ring 0. `/bin/hello` is the ring-3 path. |
 | No KASLR | kernel at `0xFFFFFFFF80000000` | Fine until a UEFI stub with entropy |
 | No XSAVE | FXSAVE is 512 bytes; AVX is not covered | Do not set `CR4.OSXSAVE` |
-| VAD array 64 | a mapping bomb fails closed with `INSUFFICIENT_RESOURCES` | fail closed is the mitigation |
+| VAD array 64 | a mapping bomb fails closed with `INSUFFICIENT_RESOURCES` | fail closed is the mitigation; commit cap is the other |
 | Recursive PML4 | if a user map ever got slot 510, they own page tables | user `NtMap` rejects high VA; user half of CR3 is private; slot is NX |
-| Host `copyin` is memcpy | host HAL is not a security boundary | hardware path probes PTEs and copies via HHDM |
+| Host `copyin` is memcpy | host HAL is not a security boundary | hardware path probes VADs and copies via HHDM |
 | Admin == kernel | Token is a field, not an object | do not claim otherwise |
-| Dead `.bss` IST arrays | `ist1`–`ist4` still occupy kernel RW after relocate | waste, not a hole; reclaim is a linker pass |
 | HHDM maps RAM RW | heap and copyin live there | kernel `.text` is RO in HHDM; user never has HHDM |
+| virtio-blk virtqueues | identify-only; I/O is Ramdisk0 | do not print "virtio I/O up" |
+| PIC not LAPIC | 8259 is v1; MADT/x2APIC is the next HAL | dmesg says 8259, never LAPIC |
 
 
 ## Panic path contract

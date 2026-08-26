@@ -8,6 +8,9 @@
 #define VNODE_FILE 1
 #define VNODE_DIR  2
 #define VNODE_CHAR 3
+#define VNODE_BLOCK 4
+
+struct device_object;
 
 typedef struct vnode {
     u32            kind;
@@ -22,6 +25,7 @@ typedef struct vnode {
     u64            cap;
     spinlock_t     lock;
     volatile u64   ref;
+    struct device_object *device;
 } vnode_t;
 
 typedef struct file_object {

@@ -53,3 +53,6 @@ status_t io_call_driver(device_object_t *dev, irp_t *irp);
 status_t io_create_device(driver_object_t *drv, usize ext, const char *name, device_object_t **out);
 void    io_init(void);
 void    serial_device_register(void);
+void    ramdisk_init(void);
+struct device_object *ramdisk_device(void);
+u64     ramdisk_size(void);

@@ -148,8 +148,12 @@ build/hello_blob.h:
 	fi
 
 run: kernel
+	@mkdir -p build
+	@if [ ! -f build/disk.img ]; then dd if=/dev/zero of=build/disk.img bs=1M count=8 status=none; fi
 	qemu-system-x86_64 -machine q35 -cpu qemu64,+syscall,+pae,+smep,+smap -m 256M \
 	  -serial stdio -display none -no-reboot -no-shutdown \
+	  -drive id=vd0,file=build/disk.img,if=none,format=raw \
+	  -device virtio-blk-pci,drive=vd0 \
 	  -kernel build/kernel.elf
 
 gdb: kernel

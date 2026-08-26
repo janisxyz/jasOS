@@ -33,6 +33,10 @@ Clone it. `make`. `make run`. That is how you boot it.
 - 0.8: `EFER.NXE`, HHDM NX + RO kernel RX, not-present kstack guard,
   lazy FXSAVE, ELF refuses W^X / executable GNU_STACK
 - 0.9: IST stacks relocated to guarded `IST_STACK_BASE`; recursive PML4 NX
+- 0.10: Ramdisk0 1 MiB IRP disk at `/dev/ram0`; virtio-blk identify-only;
+  IST `.bss` gone; user `NtCreateThread` rejects kernel RIP on host
+- 0.11: demand-zero VADs (`PTE_SW_COMMIT`), VAD probe for copyin, 32 MiB
+  commit cap, overlap reject, stack guard is not a VAD
 
 
 

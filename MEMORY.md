@@ -161,5 +161,20 @@ kstack region) via `vmm_map_guarded_stack` after `vmm_init`, before
 Residual: the `.bss` IST arrays are still linked; they are dead after
 `tss_map_ist`.
 
+T10: `.bss` IST arrays deleted. `tss_init` leaves IST pointers 0;
+`tss_map_ist` is the only installer. Ramdisk0 backing is a 1 MiB
+`kalloc_zero` under `LOCK_RANK_VFS`, not a VAD.
+
+T11: `vmm_alloc_user` inserts a committed VAD and, on hardware, a
+not-present `PTE_SW_COMMIT` proto-PTE. It does not `pmm_alloc` the
+leaf. `vmm_populate_page` (PF, `vmm_read_aspace`, `vmm_write_aspace`)
+zeros a frame and installs the real PTE. `vmm_probe_user` on hardware
+is a VAD+prot walk — requiring `PTE_P` made copyin of an untouched
+committed buffer AV. Overlap is `CONFLICTING_ADDRESSES`. Commit charge
+caps at `USER_COMMIT_MAX` (32 MiB) so a mapping bomb fails closed
+before PMM. Kernel `vmm_write_aspace` may fill an RX VAD (ELF load);
+a user write fault on that VAD still returns false. Residual: host
+shadow is still a whole-VAD `kalloc` on first touch, not per-page.
+
 
 

@@ -3,9 +3,9 @@
 #include <jasos/types.h>
 
 #define JASOS_VERSION_MAJOR  0
-#define JASOS_VERSION_MINOR  9
+#define JASOS_VERSION_MINOR  11
 #define JASOS_VERSION_PATCH  0
-#define JASOS_VERSION_STR    "0.9.0-aegis"
+#define JASOS_VERSION_STR    "0.11.0-aegis"
 
 
 #define PAGE_SHIFT           12u
@@ -74,6 +74,13 @@
 
 #define SERIAL_COM1          0x3F8u
 #define SERIAL_BAUD          115200u
+
+/* 1 MiB ramdisk. Fixed size; writes past the end fail closed. */
+#define RAMDISK_SIZE         (1u * 1024u * 1024u)
+#define RAMDISK_SECTOR       512u
+
+/* Per-process committed user virtual. A mapping bomb fails here, not in PMM. */
+#define USER_COMMIT_MAX      (32u * 1024u * 1024u)
 
 /*
  * Lock ranking. Acquire only a STRICTLY HIGHER rank while holding one.

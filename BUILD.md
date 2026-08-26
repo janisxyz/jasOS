@@ -61,6 +61,10 @@ qemu-system-x86_64 \
   -kernel build/kernel.elf
 ```
 
+T10: `make run` also creates an 8 MiB `build/disk.img` and attaches
+`virtio-blk-pci`. The kernel identifies the device; block I/O in this
+pass is Ramdisk0 (`/dev/ram0`), not virtqueues.
+
 With a GRUB ISO (optional, needs `grub-mkrescue` + `xorriso`):
 
 ```

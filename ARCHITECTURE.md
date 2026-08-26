@@ -197,6 +197,29 @@ See [BUILD.md](BUILD.md).
 | T6 | Last-thread exit drops aspace + handle table | Leaked user frames and named objects. Rank: drop PROC before VMM/HANDLE |
 | T7 | Pipe `open_fn` on insert/dup | Duplicate write handle no longer spuriously EOFs the reader |
 | T7 | Syscall Read/Write chunk at 64 KiB | A 1 MiB bounce was a kernel-heap DoS from user |
+| T10 | Ramdisk0 is a real IRP disk | dmesg "Ramdisk" with no dispatch was a lie; 1 MiB backing, `/dev/ram0` |
+| T10 | virtio-blk identify-only | Probe 0x1AF4/0x1001/0x1042; do not claim virtqueues this pass |
+| T10 | IST `.bss` arrays deleted | Guarded `IST_STACK_BASE` is the only landing pad; cli until `tss_map_ist` |
+| T11 | `NtAllocateVirtualMemory` is demand-zero | Pre-backing every page made the PF handler dead and a mapping bomb hit PMM |
+| T11 | `vmm_probe_user` walks VADs, not `PTE_P` | copyin of a committed untouched page must populate, not AV |
+
+---
+
+## T11 surface (0.11.0)
+
+- Committed VADs install `PTE_SW_COMMIT` (not-present). First PF / `vmm_read_aspace` / `vmm_write_aspace` zeros a real frame.
+- Overlap → `STATUS_CONFLICTING_ADDRESSES`. Per-process commit cap `USER_COMMIT_MAX` 32 MiB.
+- Kernel copy into an RX VAD is how ELF load works; a user write fault on that VAD still dies.
+- User stack guard page is not in any VAD, so demand-zero will not fill it.
+
+---
+
+## T10 surface (0.10.0)
+
+- `Ramdisk0` 1 MiB IRP device, `/dev/ram0` VNODE_BLOCK. Persist across close. OOB write `INVALID_PARAMETER`, overflow `DISK_FULL`.
+- virtio-blk: identify legacy/modern, read legacy capacity from BAR0+20, I/O stays on Ramdisk0.
+- IST `.bss` arrays gone. `tss_init` leaves IST=0; `tss_map_ist` after `vmm_init`.
+- User `NtCreateThread` rejects `rip > USER_CANONICAL_TOP` on host too (not just hardware).
 
 ---
 

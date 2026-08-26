@@ -342,6 +342,120 @@ int selftest_run(void)
         NtClose(pr);
     }
 
+    /* Ramdisk0 is a real 1 MiB IRP block device. Bytes persist across close. */
+    {
+        handle_t rh = 0;
+        st = NtCreateFile(&rh, FILE_READ_DATA | FILE_WRITE_DATA, "/dev/ram0",
+                          FILE_OPEN, FILE_NON_DIRECTORY_FILE);
+        EXPECT(NT_SUCCESS(st) && rh, "ram0 open");
+        char pat[512];
+        memset(pat, 0x5C, sizeof(pat));
+        memcpy(pat, "RAMDISK", 7);
+        u64 wn = 0, rn = 0;
+        st = NtWriteFile(rh, pat, 512, 0, &wn);
+        EXPECT(NT_SUCCESS(st) && wn == 512, "ram0 write sector 0");
+        memset(pat, 0xA5, sizeof(pat));
+        st = NtWriteFile(rh, pat, 512, 4096, &wn);
+        EXPECT(NT_SUCCESS(st) && wn == 512, "ram0 write sector 8");
+        NtClose(rh);
+        rh = 0;
+        st = NtCreateFile(&rh, FILE_READ_DATA | FILE_WRITE_DATA, "/dev/ram0",
+                          FILE_OPEN, FILE_NON_DIRECTORY_FILE);
+        EXPECT(NT_SUCCESS(st) && rh, "ram0 reopen");
+        char got[512];
+        memset(got, 0, sizeof(got));
+        st = NtReadFile(rh, got, 512, 0, &rn);
+        EXPECT(NT_SUCCESS(st) && rn == 512 && memcmp(got, "RAMDISK", 7) == 0,
+               "ram0 persist sector 0");
+        memset(got, 0, sizeof(got));
+        st = NtReadFile(rh, got, 512, 4096, &rn);
+        EXPECT(NT_SUCCESS(st) && rn == 512 && (u8)got[0] == 0xA5,
+               "ram0 persist sector 8");
+        char one = 1;
+        st = NtWriteFile(rh, &one, 1, RAMDISK_SIZE, &wn);
+        EXPECT(st == STATUS_INVALID_PARAMETER, "ram0 oob offset");
+        st = NtWriteFile(rh, &one, 1, RAMDISK_SIZE - 1, &wn);
+        EXPECT(NT_SUCCESS(st) && wn == 1, "ram0 last byte");
+        st = NtWriteFile(rh, pat, 2, RAMDISK_SIZE - 1, &wn);
+        EXPECT(st == STATUS_DISK_FULL, "ram0 overflow");
+        NtClose(rh);
+    }
+
+    /* User-mode NtCreateThread refuses a kernel RIP (SMEP). */
+    {
+        handle_t ph = 0;
+        st = NtCreateProcess(&ph, PROCESS_ALL_ACCESS, "/bin/hello", CREATE_SUSPENDED);
+        EXPECT(NT_SUCCESS(st) && ph, "user proc for rip check");
+        object_t *o = NULL;
+        st = ht_lookup(&psp_system_process()->handles, ph, 0, OBJ_PROCESS, &o);
+        EXPECT(NT_SUCCESS(st) && o, "user proc lookup");
+        process_t *up = (process_t *)o;
+        EXPECT(up->user_mode, "hello is user_mode");
+        process_t *saved = ke_current_process();
+        ke_pcb()->current_process = up;
+        handle_t th = 0;
+        st = NtCreateThread(&th, (void (*)(void *))KERNEL_VMA, NULL, 0);
+        EXPECT(st == STATUS_ACCESS_VIOLATION, "user thread kernel rip refused");
+        ke_pcb()->current_process = saved;
+
+        /* Demand-zero: alloc does not consume PMM; first write populates.
+           Guard page is not a VAD so PF/copy must not fill it. */
+        {
+            u64 free0 = pmm_free_pages();
+            virt_t dz = 0x0000000002000000ULL;
+            st = vmm_alloc_user(up, &dz, 16u * PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+            EXPECT(NT_SUCCESS(st) && dz == 0x0000000002000000ULL, "demand-zero alloc");
+            EXPECT(pmm_free_pages() == free0, "demand-zero no frames yet");
+            int vidx = -1;
+            for (u32 i = 0; i < up->aspace.vad_count; i++) {
+                if (up->aspace.vads[i].start == dz) { vidx = (int)i; break; }
+            }
+            EXPECT(vidx >= 0, "demand-zero VAD inserted");
+#ifdef JASOS_HOST
+            EXPECT(up->aspace.host_shadow[vidx] == NULL, "demand-zero shadow lazy");
+#endif
+            const char msg[] = "demand-zero";
+            st = vmm_write_aspace(&up->aspace, dz, msg, sizeof(msg));
+            EXPECT(NT_SUCCESS(st), "demand-zero populate write");
+#ifdef JASOS_HOST
+            EXPECT(up->aspace.host_shadow[vidx] != NULL, "demand-zero shadow filled");
+#endif
+            char back[16];
+            memset(back, 0, sizeof(back));
+            st = vmm_read_aspace(&up->aspace, back, dz, sizeof(msg));
+            EXPECT(NT_SUCCESS(st) && memcmp(back, msg, sizeof(msg)) == 0,
+                   "demand-zero readback");
+            EXPECT(vmm_handle_user_fault(&up->aspace, dz + PAGE_SIZE, true),
+                   "fault demand-zero");
+            virt_t overlap = dz + PAGE_SIZE;
+            st = vmm_alloc_user(up, &overlap, PAGE_SIZE, PAGE_READWRITE, MEM_COMMIT);
+            EXPECT(st == STATUS_CONFLICTING_ADDRESSES, "demand-zero overlap");
+            virt_t hole = USER_STACK_TOP - USER_STACK_SIZE;
+            st = vmm_write_aspace(&up->aspace, hole, "x", 1);
+            EXPECT(st == STATUS_ACCESS_VIOLATION, "stack guard not demand-zero");
+            EXPECT(!vmm_handle_user_fault(&up->aspace, hole, true), "fault miss kills");
+            virt_t ro = 0x0000000003000000ULL;
+            st = vmm_alloc_user(up, &ro, PAGE_SIZE, PAGE_READONLY, MEM_COMMIT);
+            EXPECT(NT_SUCCESS(st), "ro VAD alloc");
+            st = vmm_write_aspace(&up->aspace, ro, "x", 1);
+            EXPECT(NT_SUCCESS(st), "kernel copy into RO VAD");
+            EXPECT(!vmm_handle_user_fault(&up->aspace, ro, true),
+                   "user write fault on RO");
+            char z = 1;
+            st = vmm_read_aspace(&up->aspace, &z, ro, 1);
+            EXPECT(NT_SUCCESS(st) && z == 'x', "ro VAD kernel-filled");
+            virt_t bomb = 0x0000000004000000ULL;
+            st = vmm_alloc_user(up, &bomb, USER_COMMIT_MAX, PAGE_READWRITE, MEM_COMMIT);
+            EXPECT(st == STATUS_INSUFFICIENT_RESOURCES, "commit cap");
+            st = vmm_free_user(up, dz, 16u * PAGE_SIZE);
+            EXPECT(NT_SUCCESS(st), "demand-zero free");
+            EXPECT(pmm_free_pages() == free0, "demand-zero frames returned");
+        }
+
+        ob_dereference(o);
+        NtClose(ph);
+    }
+
     kprintf("selftest: all assertions passed\n");
     return 0;
 }

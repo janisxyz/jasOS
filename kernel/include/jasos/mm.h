@@ -60,6 +60,7 @@ typedef struct aspace {
     spinlock_t lock;
     vad_t      vads[MAX_VADS];
     u32        vad_count;
+    u64        committed_pages;
     virt_t     brk;
     virt_t     stack_base;
 #ifdef JASOS_HOST

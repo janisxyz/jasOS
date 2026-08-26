@@ -15,12 +15,37 @@
  *  - Kernel map is frozen after vmm_init except kstack leaves under a
  *    pre-created KERNEL_STACK_BASE PDPT. Loadable drivers still cannot
  *    add a new kernel PML4 slot without a shootdown we do not have.
- *  - NtAllocateVirtualMemory backs immediately. Demand-zero PF only
- *    fills a committed VAD whose PTE was dropped.
- *  - VAD array is 64 entries. A mapping bomb fails closed.
+ *  - Demand-zero fills one page at a time on PF / copyin. A 32 MiB
+ *    commit that is then touched serially still costs 8192 pmm_allocs
+ *    on the fault path, not at NtAllocate.
+ *  - VAD array is 64 entries. A mapping bomb fails closed on VAD count
+ *    or USER_COMMIT_MAX (32 MiB), whichever hits first.
  */
 
 static aspace_t g_kernel_as;
+
+static int vad_lookup(aspace_t *as, virt_t page)
+{
+    if (!as) return -1;
+    for (u32 i = 0; i < as->vad_count; i++) {
+        if (page >= as->vads[i].start && page < as->vads[i].end)
+            return (int)i;
+    }
+    return -1;
+}
+
+#ifndef JASOS_HOST
+static u64 pte_flags_from_prot(u32 prot)
+{
+    u64 flags = PTE_P | PTE_U;
+    if (prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) flags |= PTE_W;
+    if (!(prot & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
+        flags |= PTE_NX;
+    return flags;
+}
+#endif
+
+static status_t vmm_populate_page(aspace_t *as, virt_t page, bool write);
 
 #ifdef JASOS_HOST
 
@@ -30,7 +55,7 @@ void vmm_init(phys_t kphys, u64 ksize)
     (void)ksize;
     memset(&g_kernel_as, 0, sizeof(g_kernel_as));
     spin_init(&g_kernel_as.lock, "kas", LOCK_RANK_VMM);
-    kprintf("vmm: host aspace (VAD probe, no PTEs)\n");
+    kprintf("vmm: host aspace (VAD probe, demand-zero, no PTEs)\n");
 }
 
 void vmm_aspace_init(aspace_t *as)
@@ -64,18 +89,25 @@ status_t vmm_unmap(aspace_t *as, virt_t va, u64 n_pages)
 
 bool vmm_probe_user(aspace_t *as, virt_t va, u64 n, bool write)
 {
-    (void)write;
     if (n > COPY_MAX) return false;
     if (va > USER_CANONICAL_TOP) return false;
     if (va + n < va) return false;
     if (!as) return false;
     virt_t end = va + n;
-    for (u32 i = 0; i < as->vad_count; i++) {
-        if (va >= as->vads[i].start && end <= as->vads[i].end) return true;
+    int any = 0;
+    for (virt_t p = PAGE_ALIGN_DOWN(va); p < end; p += PAGE_SIZE) {
+        int idx = vad_lookup(as, p);
+        if (idx < 0) {
+            /* Host kernel-linked userland runs in the host aspace; allow
+               C string literals when no VAD covers them. */
+            continue;
+        }
+        any = 1;
+        u32 prot = as->vads[idx].prot;
+        if (write && !(prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+            return false;
     }
-    /* Host kernel-linked userland runs in the host aspace; allow heap/stack
-       of the process by default so copyin of syscall path strings works
-       when programs pass C string literals. */
+    if (any) return true;
     return true;
 }
 
@@ -388,6 +420,8 @@ status_t vmm_unmap(aspace_t *as, virt_t va, u64 n_pages)
             __asm__ volatile("mov %%cr3, %0" : "=r"(cur_cr3));
             if (cur_cr3 == as->cr3_phys)
                 __asm__ volatile("invlpg (%0)" :: "r"(page) : "memory");
+        } else if (pte) {
+            *pte = 0; /* proto PTE_SW_COMMIT, no frame */
         }
     }
     spin_unlock(&as->lock);
@@ -440,11 +474,20 @@ void vmm_aspace_destroy(aspace_t *as)
 bool vmm_probe_user(aspace_t *as, virt_t va, u64 n, bool write)
 {
     if (va > USER_CANONICAL_TOP || n > COPY_MAX || va + n < va) return false;
+    if (!as) return false;
     virt_t end = va + n;
     for (virt_t p = PAGE_ALIGN_DOWN(va); p < end; p += PAGE_SIZE) {
-        u64 *pte = walk_alloc(as->cr3_phys, p, false);
-        if (!pte || !(*pte & PTE_P) || !(*pte & PTE_U)) return false;
-        if (write && !(*pte & PTE_W)) return false;
+        int idx = vad_lookup(as, p);
+        if (idx < 0) return false;
+        u32 prot = as->vads[idx].prot;
+        if (write) {
+            if (!(prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+                return false;
+        } else {
+            if (!(prot & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE |
+                          PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
+                return false;
+        }
     }
     return true;
 }
@@ -517,102 +560,126 @@ status_t copyinstr(char *kdst, virt_t usrc, u64 cap)
     return STATUS_NAME_TOO_LONG;
 }
 
+#endif /* !JASOS_HOST */
+
+static status_t vmm_populate_page(aspace_t *as, virt_t page, bool write)
+{
+    int idx = vad_lookup(as, page);
+    if (idx < 0) return STATUS_ACCESS_VIOLATION;
+    u32 prot = as->vads[idx].prot;
+    if (write && !(prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+        return STATUS_ACCESS_VIOLATION;
+#ifdef JASOS_HOST
+    if (!as->host_shadow[idx]) {
+        u64 sz = as->vads[idx].end - as->vads[idx].start;
+        as->host_shadow[idx] = kalloc_zero(sz);
+        if (!as->host_shadow[idx]) return STATUS_NO_MEMORY;
+    }
+    return STATUS_SUCCESS;
+#else
+    u64 *pte = walk_alloc(as->cr3_phys, page, false);
+    if (pte && (*pte & PTE_P)) {
+        if (write && !(*pte & PTE_W)) return STATUS_ACCESS_VIOLATION;
+        return STATUS_SUCCESS;
+    }
+    phys_t pa = pmm_alloc(0, PMM_USER | PMM_ZERO);
+    if (pa == PMM_INVALID) return STATUS_NO_MEMORY;
+    status_t st = vmm_map(as, page, pa, 1, pte_flags_from_prot(prot));
+    if (!NT_SUCCESS(st)) {
+        pmm_free(pa, 0);
+        return st;
+    }
+    return STATUS_SUCCESS;
+#endif
+}
+
 bool vmm_handle_user_fault(aspace_t *as, virt_t va, bool write)
 {
     if (!as || va > USER_CANONICAL_TOP) return false;
-    virt_t page = PAGE_ALIGN_DOWN(va);
-    u32 prot = 0;
-    int hit = 0;
-    spin_lock(&as->lock);
-    for (u32 i = 0; i < as->vad_count; i++) {
-        if (page >= as->vads[i].start && page < as->vads[i].end) {
-            prot = as->vads[i].prot;
-            hit = 1;
-            break;
-        }
-    }
-    spin_unlock(&as->lock);
-    if (!hit) return false;
-    if (write && !(prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
-        return false;
-    u64 *pte = walk_alloc(as->cr3_phys, page, false);
-    if (pte && (*pte & PTE_P)) {
-        if (write && !(*pte & PTE_W)) return false;
-        return true; /* spurious */
-    }
-    phys_t pa = pmm_alloc(0, PMM_USER | PMM_ZERO);
-    if (pa == PMM_INVALID) return false;
-    u64 flags = PTE_P | PTE_U;
-    if (prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) flags |= PTE_W;
-    if (!(prot & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
-        flags |= PTE_NX;
-    if (!NT_SUCCESS(vmm_map(as, page, pa, 1, flags))) {
-        pmm_free(pa, 0);
-        return false;
-    }
-    return true;
+    return NT_SUCCESS(vmm_populate_page(as, PAGE_ALIGN_DOWN(va), write));
 }
-
-#endif /* !JASOS_HOST */
 
 status_t vmm_alloc_user(process_t *p, virt_t *base, u64 size, u32 prot, u32 type)
 {
     if (!p || !base || size == 0) return STATUS_INVALID_PARAMETER;
     size = PAGE_ALIGN_UP(size);
-    virt_t va = *base;
     aspace_t *as = &p->aspace;
-    if (as->vad_count >= MAX_VADS) return STATUS_INSUFFICIENT_RESOURCES;
-    if (va == 0) {
-        va = as->brk;
-        as->brk = va + size;
-    }
-    if (va > USER_CANONICAL_TOP || va + size < va) return STATUS_CONFLICTING_ADDRESSES;
-    u64 flags = PTE_P | PTE_U;
-    if (prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) flags |= PTE_W;
-    if (!(prot & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE))) flags |= PTE_NX;
-
+    virt_t va = *base;
     u64 pages = size / PAGE_SIZE;
-    for (u64 i = 0; i < pages; i++) {
-        phys_t pa = pmm_alloc(0, PMM_USER | PMM_ZERO);
-        if (pa == PMM_INVALID) {
-            /* rollback */
-            vmm_unmap(as, va, i);
-            return STATUS_NO_MEMORY;
+    if (pages > (USER_COMMIT_MAX / PAGE_SIZE))
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    spin_lock(&as->lock);
+    if (va == 0)
+        va = as->brk;
+    if (va > USER_CANONICAL_TOP || va + size < va ||
+        (size && va + size - 1 > USER_CANONICAL_TOP)) {
+        spin_unlock(&as->lock);
+        return STATUS_CONFLICTING_ADDRESSES;
+    }
+    if (as->vad_count >= MAX_VADS) {
+        spin_unlock(&as->lock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (as->committed_pages + pages > (USER_COMMIT_MAX / PAGE_SIZE)) {
+        spin_unlock(&as->lock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    for (u32 i = 0; i < as->vad_count; i++) {
+        if (va < as->vads[i].end && va + size > as->vads[i].start) {
+            spin_unlock(&as->lock);
+            return STATUS_CONFLICTING_ADDRESSES;
         }
-        status_t st = vmm_map(as, va + i * PAGE_SIZE, pa, 1, flags);
-        if (!NT_SUCCESS(st)) return st;
     }
-    vad_t *v = &as->vads[as->vad_count];
-#ifdef JASOS_HOST
-    as->host_shadow[as->vad_count] = kalloc_zero(size);
-    if (!as->host_shadow[as->vad_count]) {
-        vmm_unmap(as, va, pages);
-        return STATUS_NO_MEMORY;
-    }
-#endif
+    u32 idx = as->vad_count;
+    vad_t *v = &as->vads[idx];
     v->start = va;
     v->end = va + size;
     v->prot = prot;
     v->type = type;
     v->committed = 1;
+#ifdef JASOS_HOST
+    as->host_shadow[idx] = NULL;
+#endif
     as->vad_count++;
+    as->committed_pages += pages;
+    if (*base == 0)
+        as->brk = va + size;
+    spin_unlock(&as->lock);
+
+#ifndef JASOS_HOST
+    for (u64 i = 0; i < pages; i++) {
+        u64 *pte = walk_alloc(as->cr3_phys, va + i * PAGE_SIZE, true);
+        if (!pte) {
+            vmm_free_user(p, va, size);
+            return STATUS_NO_MEMORY;
+        }
+        *pte = PTE_SW_COMMIT;
+    }
+#endif
     *base = va;
+    (void)type;
     return STATUS_SUCCESS;
 }
 
 status_t vmm_free_user(process_t *p, virt_t base, u64 size)
 {
     if (!p) return STATUS_INVALID_PARAMETER;
-    size = PAGE_ALIGN_UP(size);
+    (void)size;
     aspace_t *as = &p->aspace;
     for (u32 i = 0; i < as->vad_count; i++) {
         if (as->vads[i].start == base) {
-            vmm_unmap(as, base, size / PAGE_SIZE);
+            u64 pages = (as->vads[i].end - as->vads[i].start) / PAGE_SIZE;
+            vmm_unmap(as, as->vads[i].start, pages);
 #ifdef JASOS_HOST
             kfree(as->host_shadow[i]);
             as->host_shadow[i] = as->host_shadow[as->vad_count - 1];
             as->host_shadow[as->vad_count - 1] = NULL;
 #endif
+            if (as->committed_pages >= pages)
+                as->committed_pages -= pages;
+            else
+                as->committed_pages = 0;
             as->vads[i] = as->vads[--as->vad_count];
             return STATUS_SUCCESS;
         }
@@ -626,6 +693,8 @@ status_t vmm_write_aspace(aspace_t *as, virt_t va, const void *src, u64 n)
     const u8 *s = src;
 #ifdef JASOS_HOST
     while (n) {
+        status_t st = vmm_populate_page(as, PAGE_ALIGN_DOWN(va), false);
+        if (!NT_SUCCESS(st)) return st;
         u32 hit = (u32)-1;
         for (u32 i = 0; i < as->vad_count; i++) {
             if (va >= as->vads[i].start && va < as->vads[i].end) {
@@ -644,6 +713,8 @@ status_t vmm_write_aspace(aspace_t *as, virt_t va, const void *src, u64 n)
     return STATUS_SUCCESS;
 #else
     while (n) {
+        status_t st = vmm_populate_page(as, PAGE_ALIGN_DOWN(va), false);
+        if (!NT_SUCCESS(st)) return st;
         u64 *pte = walk_alloc(as->cr3_phys, PAGE_ALIGN_DOWN(va), false);
         if (!pte || !(*pte & PTE_P)) return STATUS_ACCESS_VIOLATION;
         phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
@@ -664,6 +735,8 @@ status_t vmm_read_aspace(aspace_t *as, void *dst, virt_t va, u64 n)
     u8 *d = dst;
 #ifdef JASOS_HOST
     while (n) {
+        status_t st = vmm_populate_page(as, PAGE_ALIGN_DOWN(va), false);
+        if (!NT_SUCCESS(st)) return st;
         u32 hit = (u32)-1;
         for (u32 i = 0; i < as->vad_count; i++) {
             if (va >= as->vads[i].start && va < as->vads[i].end) {
@@ -682,6 +755,8 @@ status_t vmm_read_aspace(aspace_t *as, void *dst, virt_t va, u64 n)
     return STATUS_SUCCESS;
 #else
     while (n) {
+        status_t st = vmm_populate_page(as, PAGE_ALIGN_DOWN(va), false);
+        if (!NT_SUCCESS(st)) return st;
         u64 *pte = walk_alloc(as->cr3_phys, PAGE_ALIGN_DOWN(va), false);
         if (!pte || !(*pte & PTE_P)) return STATUS_ACCESS_VIOLATION;
         phys_t pa = *pte & 0x000FFFFFFFFFF000ULL;
@@ -700,14 +775,4 @@ aspace_t *vmm_kernel_aspace(void)
 {
     return &g_kernel_as;
 }
-
-#ifdef JASOS_HOST
-bool vmm_handle_user_fault(aspace_t *as, virt_t va, bool write)
-{
-    (void)as;
-    (void)va;
-    (void)write;
-    return false;
-}
-#endif
 

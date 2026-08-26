@@ -31,10 +31,6 @@ typedef struct PACKED {
 static gdt_entry_t gdt[8];
 static gdtr_t      gdtr;
 static tss_t       tss;
-static u8          ist1[4096] ALIGNED(16);
-static u8          ist2[4096] ALIGNED(16);
-static u8          ist3[4096] ALIGNED(16);
-static u8          ist4[16384] ALIGNED(16);
 
 static void gdt_set(int i, u32 base, u32 limit, u8 access, u8 gran)
 {
@@ -76,10 +72,8 @@ void gdt_init(void)
 void tss_init(void)
 {
     memset(&tss, 0, sizeof(tss));
-    tss.ist[0] = (u64)(ist1 + sizeof(ist1));
-    tss.ist[1] = (u64)(ist2 + sizeof(ist2));
-    tss.ist[2] = (u64)(ist3 + sizeof(ist3));
-    tss.ist[3] = (u64)(ist4 + sizeof(ist4));
+    /* IST pointers stay 0 until tss_map_ist after vmm_init. Interrupts
+       are off (cli) for this window; a #DF here is a boot bug anyway. */
     tss.iomap = sizeof(tss);
     u64 b = (u64)&tss;
     gdt_set(5, (u32)b, sizeof(tss) - 1, 0x89, 0);
@@ -87,8 +81,7 @@ void tss_init(void)
     gdt[6].limit_low = (u16)(b >> 32);
     gdt[6].base_low  = (u16)(b >> 48);
     __asm__ volatile("ltr %0" :: "r"((u16)0x28));
-    kprintf("tss: IST1=#DF IST2=NMI IST3=#MC IST4=irq %u bytes\n",
-            (unsigned)sizeof(ist4));
+    kprintf("tss: loaded, IST pending vmm (no .bss stacks)\n");
 }
 
 void tss_set_rsp0(u64 rsp)
@@ -98,11 +91,8 @@ void tss_set_rsp0(u64 rsp)
 
 #ifndef JASOS_HOST
 /*
- * Relocate IST stacks off .bss onto KERNEL_STACK_BASE's neighbour
- * (IST_STACK_BASE). Called after vmm_init, before sti. The .bss
- * arrays stay as a boot-time landing pad; once TSS.IST* point at
- * the guarded stacks, an overflow is a not-present #PF / DF, not
- * a smash of kernel data.
+ * Map IST stacks at IST_STACK_BASE. Called after vmm_init, before sti.
+ * T10: there is no .bss landing pad. IST=0 until this runs; cli holds.
  */
 void tss_map_ist(void)
 {

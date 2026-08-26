@@ -5,6 +5,7 @@
 #include <jasos/ke.h>
 #include <jasos/elf.h>
 #include <jasos/config.h>
+#include <jasos/io.h>
 
 #if defined(__has_include)
 #  if __has_include("hello_blob.h")
@@ -185,7 +186,7 @@ status_t vfs_open(const char *path, access_t access, u32 disp, u32 opts, file_ob
     if (!NT_SUCCESS(st) && disp == FILE_OPEN) return st;
     if (v && v->kind == VNODE_DIR && (opts & FILE_NON_DIRECTORY_FILE))
         return STATUS_FILE_IS_A_DIRECTORY;
-    if (v && v->kind == VNODE_FILE && (opts & FILE_DIRECTORY_FILE))
+    if (v && v->kind != VNODE_DIR && (opts & FILE_DIRECTORY_FILE))
         return STATUS_NOT_A_DIRECTORY;
     if (!v) {
         if (disp == FILE_OPEN) return STATUS_NO_SUCH_FILE;
@@ -235,6 +236,20 @@ status_t vfs_read(file_object_t *f, void *buf, u64 n, u64 *got)
         if (got) *got = nread;
         return nread ? STATUS_SUCCESS : STATUS_END_OF_FILE;
     }
+    if (v->kind == VNODE_BLOCK) {
+        if (!v->device) return STATUS_NO_SUCH_FILE;
+        irp_t *irp = io_alloc_irp(IRP_MJ_READ);
+        if (!irp) return STATUS_NO_MEMORY;
+        irp->buffer = buf;
+        irp->length = n;
+        irp->offset = f->offset;
+        status_t st = io_call_driver(v->device, irp);
+        u64 nread = irp->information;
+        f->offset += nread;
+        if (got) *got = nread;
+        io_free_irp(irp);
+        return st;
+    }
     if (v->kind != VNODE_FILE) return STATUS_INVALID_PARAMETER;
     spin_lock(&v->lock);
     u64 off = f->offset;
@@ -263,6 +278,20 @@ status_t vfs_write(file_object_t *f, const void *buf, u64 n, u64 *put)
         for (u64 i = 0; i < n; i++) serial_putchar(s[i]);
         if (put) *put = n;
         return STATUS_SUCCESS;
+    }
+    if (v->kind == VNODE_BLOCK) {
+        if (!v->device) return STATUS_NO_SUCH_FILE;
+        irp_t *irp = io_alloc_irp(IRP_MJ_WRITE);
+        if (!irp) return STATUS_NO_MEMORY;
+        irp->buffer = (void *)buf;
+        irp->length = n;
+        irp->offset = f->offset;
+        status_t st = io_call_driver(v->device, irp);
+        u64 nput = irp->information;
+        f->offset += nput;
+        if (put) *put = nput;
+        io_free_irp(irp);
+        return st;
     }
     if (v->kind != VNODE_FILE) return STATUS_FILE_IS_A_DIRECTORY;
     spin_lock(&v->lock);
@@ -381,6 +410,12 @@ status_t vfs_seed_initrd(void)
         if (NT_SUCCESS(walk("/dev", &parent, &v, leaf, true)) && v) {
             vnode_t *con = vn_alloc("console", VNODE_CHAR);
             if (con) vn_attach(v, con);
+            vnode_t *rd = vn_alloc("ram0", VNODE_BLOCK);
+            if (rd) {
+                rd->device = ramdisk_device();
+                rd->size = ramdisk_size();
+                vn_attach(v, rd);
+            }
         }
     }
     seed_file("/etc/motd",

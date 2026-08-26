@@ -174,3 +174,8 @@ to generation 0 so a never-issued handle does not match. `ht_lookup_ex`
 snapshots the granted access under the table lock so `ht_duplicate`
 does not TOCTOU the access mask. `object_type.close_fn` runs from
 `ht_close` — pipes decrement writer/reader counts and signal EOF.
+
+T10: `Ramdisk0` is a Device object with IRP_MJ_CREATE/CLOSE/READ/WRITE.
+`/dev/ram0` is a VNODE_BLOCK whose `device` pointer is that object.
+Bytes live in a 1 MiB kernel backing store, not in the vnode `data`
+blob. Serial0 is still write-only CHAR.
